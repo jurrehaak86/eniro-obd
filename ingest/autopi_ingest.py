@@ -50,7 +50,47 @@ import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-import paho.mqtt.client as mqtt
+
+def _stub_paho():
+    """Nep-paho voor --selftest: geen broker en geen paho nodig."""
+    import types
+
+    class _Info:
+        rc = 0
+
+        def wait_for_publish(self, timeout=None):
+            pass
+
+        def is_published(self):
+            return True
+
+    class _Client:
+        def __init__(self, *a, **k):
+            self.gepubliceerd = []
+
+        def __getattr__(self, naam):
+            return lambda *a, **k: None
+
+        def publish(self, topic, payload=None, qos=0, retain=False):
+            self.gepubliceerd.append((topic, payload))
+            return _Info()
+
+    client = types.ModuleType("paho.mqtt.client")
+    client.Client = _Client
+    client.CallbackAPIVersion = types.SimpleNamespace(VERSION2=2)
+    client.MQTT_ERR_SUCCESS = 0
+    for naam in ("paho", "paho.mqtt"):
+        sys.modules[naam] = types.ModuleType(naam)
+    sys.modules["paho.mqtt.client"] = client
+    sys.modules["paho.mqtt"].client = client
+    sys.modules["paho"].mqtt = sys.modules["paho.mqtt"]
+
+
+SELFTEST = "--selftest" in sys.argv[1:]
+if SELFTEST:
+    _stub_paho()
+
+import paho.mqtt.client as mqtt  # noqa: E402
 
 # ---------------------------------------------------------------- configuratie
 
@@ -98,7 +138,7 @@ def mask_path(path):
         return "/ingest/***"
     return "/ingest/%s***%s" % (staart[:3], staart[-2:])
 
-if not INGEST_PATH:
+if not INGEST_PATH and not SELFTEST:
     log.error("INGEST_PATH is niet gezet. Zonder geheim pad start ik niet.")
     sys.exit(1)
 
@@ -350,6 +390,17 @@ class Bundel:
             if self.sinds is None:
                 self.sinds = time.monotonic()
 
+    def vergeet(self, topic):
+        """Gooit een wachtende waarde weg; er gaat net iets nieuwers live.
+
+        Anders publiceert de volgende bundel een ouder record ná het nieuwere
+        en springt bijvoorbeeld de SoC in HA terug.
+        """
+        with self.lock:
+            self.laatste.pop(topic, None)
+            if not self.laatste:
+                self.sinds = None
+
     def moet_weg(self):
         with self.lock:
             if not self.laatste:
@@ -383,20 +434,41 @@ class Bundel:
 bundel = Bundel()
 
 
-def is_laadrecord(record):
-    """BMS-record van eniro-soc terwijl de auto laadt.
-
-    Die gaan ook in 'dagelijks' op 4G direct door: de laadautomation in HA wil
-    tijdens het laden een verse SoC. eniro-soc stuurt er dan één per 5 min.
-    """
-    if record.get("@t") != "obd.ev.bms":
-        return False
+def laadt(record):
+    """Zelfde definitie als laadt() in eniro_soc.py: snelladen, of meer dan
+    1 A de accu in met het contact uit."""
     try:
         stroom = float(record.get("hv_current", 0))
     except (TypeError, ValueError):
         stroom = 0.0
     return bool(record.get("dc_charging")) or (
         stroom < -1.0 and not record.get("ignition"))
+
+
+def is_bms(record):
+    return record.get("@t") == "obd.ev.bms"
+
+
+# Laadstatus van het laatst live gepubliceerde BMS-record; None = nog niets
+# sinds de start, en dan geldt er ook geen wissel (zuinig, zoals v1.0).
+# Alleen bijgewerkt na een gelukte publicatie, zodat een herhaalde upload na
+# een 503 opnieuw live gaat.
+laatste_bms_laadt = None
+
+
+def is_laadrecord(record):
+    """BMS-record van eniro-soc terwijl de auto laadt, of het eerste record
+    na een laadwissel (begin of einde van laden).
+
+    Die gaan ook in 'dagelijks' op 4G direct door: de laadautomation in HA wil
+    tijdens het laden een verse SoC (eniro-soc stuurt er dan één per 5 min),
+    en het einde van laden mag niet een half uur in de bundel blijven hangen.
+    """
+    if not is_bms(record):
+        return False
+    if laadt(record):
+        return True
+    return laatste_bms_laadt is not None and laatste_bms_laadt != laadt(record)
 
 
 def bundel_lus(stop):
@@ -418,6 +490,7 @@ def handle_payload(body, content_encoding):
     if not isinstance(data, list):
         raise ValueError("verwachtte een JSON-array of -object, kreeg %s" % type(data))
 
+    global laatste_bms_laadt
     ok = True
     gebundeld = bundelen()
     if not gebundeld and bundel.laatste:
@@ -434,7 +507,12 @@ def handle_payload(body, content_encoding):
                 and not any(staart.startswith(u) for u in BUNDEL_UITZONDERINGEN)):
             bundel.voeg_toe(topic, payload)
             continue
-        ok = publisher.publish(topic, payload) and ok
+        # Wat nog voor dit topic in de bundel wacht is ouder: weg ermee.
+        bundel.vergeet(topic)
+        gelukt = publisher.publish(topic, payload)
+        if gelukt and is_bms(record):
+            laatste_bms_laadt = laadt(record)
+        ok = gelukt and ok
         ok = publisher.publish(f"{MQTT_PREFIX}/_last", payload) and ok
         log.debug("→ %s %s", topic, payload)
     return len(data), ok
@@ -511,7 +589,59 @@ class Handler(BaseHTTPRequestHandler):
         log.debug("%s %s", self.client_address[0], fmt % args)
 
 
+def selftest():
+    """Speelt een rit, een laadsessie en het einde ervan af op 4G in profiel
+    'dagelijks', met een nep-broker. Controleert dat het einde van laden live
+    gaat en dat er nooit een ouder BMS-record na een nieuwer komt."""
+    global PROFIEL_TOPIC, default_iface
+    PROFIEL_TOPIC = "selftest/profiel"
+    profiel.naam = "dagelijks"
+    default_iface = lambda *a: "wwan0"          # noqa: E731 - 4G
+    publisher.connected.set()
+    log.setLevel(logging.WARNING)
+    gepubliceerd = publisher.client.gepubliceerd
+    bms_topic = f"{MQTT_PREFIX}/obd/ev/bms"
+
+    def post(ts, stroom, contact):
+        rec = {"@t": "obd.ev.bms", "@ts": ts, "hv_current": stroom,
+               "ignition": contact, "dc_charging": False, "soc_display": 50}
+        handle_payload(json.dumps([rec]).encode(), None)
+
+    def bms_ts():
+        uit = [json.loads(p)["@ts"] for t, p in gepubliceerd if t == bms_topic]
+        del gepubliceerd[:]
+        return uit
+
+    checks = []
+    post("10:00", 30.0, True)                  # rijden: gebundeld
+    checks.append(("rit wordt gebundeld", bms_ts() == []))
+    post("10:05", -7.0, False)                 # laden begint
+    checks.append(("begin laden gaat live", bms_ts() == ["10:05"]))
+    checks.append(("oudere rit-waarde uit de bundel gehaald",
+                   bms_topic not in bundel.laatste))
+    post("10:10", -7.0, False)
+    checks.append(("tijdens laden live", bms_ts() == ["10:10"]))
+    post("10:33", 0.0, False)                  # laden gestopt, SoC gelijk
+    checks.append(("einde laden gaat live", bms_ts() == ["10:33"]))
+    post("10:40", 0.0, False)                  # stilstaan: weer bundelen
+    checks.append(("daarna weer gebundeld", bms_ts() == []))
+    bundel.verstuur("afsluiten")
+    checks.append(("bundel geeft alleen het nieuwste", bms_ts() == ["10:40"]))
+    checks.append(("laaddefinitie: regeneratie is geen laden",
+                   not laadt({"hv_current": -20.0, "ignition": True})))
+
+    ok = True
+    for label, geslaagd in checks:
+        print("  %s %s" % ("PASS" if geslaagd else "FAIL", label))
+        ok = ok and geslaagd
+    print()
+    print("ZELFTEST %s" % ("GESLAAGD" if ok else "MISLUKT"))
+    return 0 if ok else 1
+
+
 def main():
+    if SELFTEST:
+        sys.exit(selftest())
     publisher.start()
     server = ThreadingHTTPServer((LISTEN_HOST, LISTEN_PORT), Handler)
     server.daemon_threads = True

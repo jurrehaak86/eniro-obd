@@ -1240,7 +1240,7 @@ erop. De belangrijkste:
 | `sensor.e_niro_verbruik_100_km` | netto, na de eerste 100 km |
 | `sensor.e_niro_actieradius` | SOC × bruikbare capaciteit / verbruik (uit `eniro-autopi.yaml`); valt terug op `input_number.e_niro_verbruik_laatst_bekend` als het verbruik na een herstart nog onbekend is |
 | `sensor.e_niro_state_of_health` | |
-| `binary_sensor.e_niro_laadt`, `binary_sensor.e_niro_snelladen`, `binary_sensor.e_niro_contact` | |
+| `binary_sensor.e_niro_laadt`, `binary_sensor.e_niro_snelladen`, `binary_sensor.e_niro_contact` | *laadt* = snelladen, of meer dan 1 A de accu in met het contact uit (dezelfde definitie als eniro-soc). *laadt* en *snelladen* worden onbeschikbaar na 15 minuten zonder BMS-record: tijdens laden komt er minstens elke 5 minuten een, dus stilte betekent dat de stand onbekend is, niet dat het laden gestopt is |
 | `device_tracker.e_niro_locatie` | GPS van de dongle (10.4) |
 | `sensor.autopi_12v_spanning`, `sensor.autopi_12v_niveau`, `sensor.autopi_12v_laadstatus` | 12V-accu, gemeten door de dongle |
 | `sensor.autopi_laatste_meting` | tijdstip van de laatste 12V-meting |
@@ -1296,7 +1296,7 @@ kies je:
 
 | Profiel | Op 4G | Op wifi |
 |---|---|---|
-| **Dagelijks** (standaard) | per topic alleen de laatste stand, elke 30 minuten in één keer en bij inslapen; laadrecords en `vehicle/battery/critical_level` altijd direct | alles live |
+| **Dagelijks** (standaard) | per topic alleen de laatste stand, elke 30 minuten in één keer en bij inslapen; laadrecords, het eerste record na begin of einde van laden en `vehicle/battery/critical_level` altijd direct | alles live |
 | **Reis** | alles live — voor een lange rit met ABRP | alles live |
 
 De automatisering **AutoPi - profiel naar dongle** zet de keuze retained op

@@ -108,7 +108,7 @@ CAN_RESTART_MS = int(os.environ.get("CAN_RESTART_MS", "100"))
 
 INGEST_URL = os.environ.get("INGEST_URL", "")
 HTTP_TIMEOUT = float(os.environ.get("HTTP_TIMEOUT", "30"))
-USER_AGENT = os.environ.get("USER_AGENT", "eniro-soc/1.0")
+USER_AGENT = os.environ.get("USER_AGENT", "eniro-soc/1.1")
 
 # Pollintervallen in seconden, per voertuigstatus.
 INTERVAL_DC = int(os.environ.get("INTERVAL_DC", "60"))
@@ -297,14 +297,37 @@ def isotp_query(sock, service_pid, timeout=2.0, req=None, rsp=None):
     deadline = time.monotonic() + timeout
     _send(sock, req, bytes([len(service_pid)]) + service_pid)
 
-    first = _recv(sock, rsp, deadline)
-    pci = first[0] >> 4
+    while True:
+        first = _recv(sock, rsp, deadline)
+        # Een frame zonder data (DLC 0) is geen antwoord. Vóór v1.1 gaf dit
+        # een IndexError die de hele dienst liet crashen.
+        if not first:
+            raise BusError("leeg frame (DLC 0) van %03X" % rsp)
+        pci = first[0] >> 4
 
-    if pci == 0:  # single frame
+        if pci != 0:
+            break
+
+        # single frame
         length = first[0] & 0x0F
-        return first[1 : 1 + length]
+        if length == 0 or length > len(first) - 1:
+            raise BusError("ongeldige single-frame-lengte in %s" % first.hex())
+        antwoord = first[1 : 1 + length]
 
-    if pci != 1:  # verwacht een first frame
+        # Negatief UDS-antwoord: 7F <service> <NRC>. NRC 0x78 betekent
+        # 'responsePending': het echte antwoord komt nog, dus doorwachten tot
+        # de deadline. Elke andere NRC is een weigering.
+        if antwoord[0] == 0x7F:
+            nrc = antwoord[2] if len(antwoord) >= 3 else None
+            if nrc == 0x78:
+                log.debug("%03X: responsePending, wacht op het antwoord", rsp)
+                continue
+            raise BusError("negatief antwoord van %03X op %s: NRC %s" % (
+                rsp, service_pid.hex().upper(),
+                "onbekend" if nrc is None else "0x%02X" % nrc))
+        return antwoord
+
+    if pci != 1 or len(first) < 2:  # verwacht een first frame
         raise BusError("onverwacht PCI-type 0x%X in %s" % (pci, first.hex()))
 
     total = ((first[0] & 0x0F) << 8) | first[1]
@@ -316,6 +339,8 @@ def isotp_query(sock, service_pid, timeout=2.0, req=None, rsp=None):
     expect = 0x21
     while len(data) < total:
         cf = _recv(sock, rsp, deadline)
+        if not cf:
+            raise BusError("leeg vervolgframe (DLC 0) van %03X" % rsp)
         if cf[0] != expect:
             raise BusError(
                 "verwachtte volgnummer %02X, kreeg %02X" % (expect, cf[0])
@@ -329,7 +354,7 @@ def isotp_query(sock, service_pid, timeout=2.0, req=None, rsp=None):
 # ------------------------------------------------------------------ decoderen
 #
 # De letters komen uit de HKMC-EV-tabellen (JejuSoul) en beginnen bij de eerste
-# byte NA de echo `62 01 0X`. Zie autopi/eniro-pid-decoder.md voor de
+# byte NA de echo `62 01 0X`. Zie docs/pids-e-niro.md voor de
 # verificatie tegen dashboard, 12V-meting en celspanningen.
 
 
@@ -349,6 +374,27 @@ def as_map(response, echo_len=3):
     data = response[echo_len:]
     keys = _letters(len(data))
     return {keys[i]: data[i] for i in range(len(data))}
+
+
+# Minimale lengte van het antwoord, echo meegeteld: de hoogste letter die
+# decode_0101 leest is 'bg' (byte 59 na de echo), bij decode_0105 'af' (32).
+MIN_LEN_0101 = 3 + 59
+MIN_LEN_0105 = 3 + 32
+
+
+def check_antwoord(antwoord, did, minimaal):
+    """Controleert echo (62 + DID) en lengte vóór het decoderen.
+
+    Een antwoord op een ander verzoek, of een afgekapt antwoord, zou anders
+    stilletjes onzin opleveren of een KeyError geven.
+    """
+    echo = b"\x62" + did
+    if antwoord[:3] != echo:
+        raise BusError("verwachtte echo %s, kreeg %s" % (echo.hex(), antwoord[:3].hex()))
+    if len(antwoord) < minimaal:
+        raise BusError("antwoord op %s te kort: %d bytes, minimaal %d"
+                       % (did.hex().upper(), len(antwoord), minimaal))
+    return antwoord
 
 
 def _u16(m, hi, lo):
@@ -396,7 +442,7 @@ def decode_0105(m):
     }
     # Bewust NIET meegenomen: "max regen" en "max vermogen" uit 220101.
     # Die geven op dit voertuig beide 170 kW, wat onmogelijk is. Zie
-    # eniro-pid-decoder.md.
+    # docs/pids-e-niro.md.
 
 
 def read_odometer(sock):
@@ -409,11 +455,10 @@ def read_odometer(sock):
     try:
         antwoord = isotp_query(sock, b"\x22\xB0\x02", timeout=1.0,
                                req=ODO_REQ, rsp=ODO_RSP)
+        check_antwoord(antwoord, b"\xB0\x02", 3 + ODO_OFFSET + 3)
     except (BusError, OSError):
         return None
     data = antwoord[3:]            # echo 62 B0 02 eraf
-    if len(data) < ODO_OFFSET + 3:
-        return None
     km = int.from_bytes(data[ODO_OFFSET:ODO_OFFSET + 3], "big")
 
     # Onzin weigeren in plaats van doorgeven. Op 16-09-2026 landde er een
@@ -480,6 +525,18 @@ def schrijf_status(toestand, values=None):
         log.warning("Status schrijven mislukt: %s", exc)
 
 
+def laadt(values):
+    """De enige definitie van 'de auto laadt', overal in dit script gebruikt.
+
+    Snelladen, of meer dan 1 A de accu in met het contact uit. Zonder die
+    laatste voorwaarde telt elke regeneratieve rem tijdens het rijden als
+    laden. De ontvanger en de HA-sensor 'e-Niro laadt' gebruiken dezelfde
+    definitie.
+    """
+    return bool(values.get("dc_charging")) or (
+        values.get("hv_current", 0.0) < -1.0 and not values.get("ignition"))
+
+
 def markeer_laden(values):
     """Onthoudt dat er geladen is sinds het laatste kilometerpunt.
 
@@ -487,9 +544,7 @@ def markeer_laden(values):
     slaapperiode van de dongle overleeft: laden gebeurt juist terwijl de auto
     stilstaat, en tussen twee kilometerpunten kan de dongle uren slapen.
     """
-    laadt = values.get("dc_charging") or (
-        values.get("hv_current", 0.0) < -1.0 and not values.get("ignition"))
-    if not laadt:
+    if not laadt(values):
         return
     try:
         if not os.path.exists(LAADVLAG_BESTAND):
@@ -583,8 +638,10 @@ def verbruik_venster(values):
 
 
 def read_bms(sock):
-    m1 = as_map(isotp_query(sock, b"\x22\x01\x01"))
-    m5 = as_map(isotp_query(sock, b"\x22\x01\x05"))
+    m1 = as_map(check_antwoord(isotp_query(sock, b"\x22\x01\x01"),
+                               b"\x01\x01", MIN_LEN_0101))
+    m5 = as_map(check_antwoord(isotp_query(sock, b"\x22\x01\x05"),
+                               b"\x01\x05", MIN_LEN_0105))
     out = {}
     out.update(decode_0101(m1))
     out.update(decode_0105(m5))
@@ -728,10 +785,8 @@ def interval_for(values, metered=True):
     if values.get("dc_charging"):
         return INTERVAL_DC, UPLOAD_WAIT_DC, "snelladen"
 
-    # Laden alleen met het contact uit, net als in markeer_laden(). Anders
-    # telt elke regeneratieve rem tijdens het rijden als laden.
-    current = values.get("hv_current", 0.0)
-    if current < -1.0 and not values.get("ignition"):
+    # Laden alleen met het contact uit, zie laadt().
+    if laadt(values):
         if not metered:
             return INTERVAL_UNMETERED, 0, "laden"
         # Direct door: de ontvanger staat op de dongle zelf (geen TLS-handshake
@@ -747,15 +802,14 @@ def interval_for(values, metered=True):
     return INTERVAL_IDLE, UPLOAD_WAIT, "idle"
 
 
-def laadt(values):
-    return bool(values.get("dc_charging")) or (
-        values.get("hv_current", 0.0) < -1.0 and not values.get("ignition"))
-
-
 def worth_sending(values, last_sent, last_time):
     """Alleen versturen bij verandering, of na MAX_SILENCE. Spaart data."""
     if last_sent is None:
         return True, "eerste meting"
+    # Begin én einde van laden. Vóór v1.1 ging het einde van een AC-lading
+    # (stroom −2 → 0 A, SOC en statusbits gelijk) nooit weg.
+    if laadt(values) != laadt(last_sent):
+        return True, "laadstatus veranderd"
     if time.time() - last_time >= MAX_SILENCE:
         return True, "hartslag"
     if laadt(values) and time.time() - last_time >= MAX_SILENCE_LADEN - 5:
@@ -870,6 +924,14 @@ def run_loop(dry_run=False):
             sock.close()
             bus_stil()
             continue
+        except Exception:  # noqa: BLE001 - laatste vangnet
+            # Onverwacht antwoord of een bug in het decoderen: niet crashen,
+            # want dan gaat de uitbox verloren. Behandelen als een stille bus;
+            # bus_stil() verstuurt wat er nog in de uitbox staat.
+            log.exception("Onverwachte fout bij het uitlezen, behandeld als stille bus")
+            sock.close()
+            bus_stil()
+            continue
         finally:
             try:
                 sock.close()
@@ -879,6 +941,8 @@ def run_loop(dry_run=False):
         metered = is_metered()
         interval, wachttijd, why = interval_for(values, metered)
         send, reason = worth_sending(values, last_sent, last_time)
+        # Laadwissel: direct versturen, net als tijdens laden.
+        laadwissel = last_sent is not None and laadt(values) != laadt(last_sent)
 
         log.info(
             "SOC %.1f%% (BMS %.1f%%) · %.1f V · %.1f A · %s · %s · volgende over %ds",
@@ -909,6 +973,7 @@ def run_loop(dry_run=False):
             if outbox and (
                 wachttijd <= 0
                 or nieuw
+                or laadwissel
                 or time.time() - outbox_since >= wachttijd
                 or len(outbox) >= OUTBOX_MAX
             ):
@@ -994,6 +1059,82 @@ def _verbruik_selftest():
     return uitkomsten
 
 
+class _NepSocket:
+    """Speelt vooraf opgegeven CAN-frames af als antwoord; voor de zelftest."""
+
+    def __init__(self, frames):
+        self.frames = list(frames)
+
+    def send(self, data):
+        pass
+
+    def settimeout(self, t):
+        pass
+
+    def recv(self, n):
+        if not self.frames:
+            time.sleep(0.05)
+            raise socket.timeout()
+        data, dlc = self.frames.pop(0)
+        return struct.pack(CAN_FRAME_FMT, RSP_ID, dlc, data.ljust(8, b"\x00"))
+
+
+def _geeft_buserror(functie, *args, **kwargs):
+    try:
+        functie(*args, **kwargs)
+    except BusError:
+        return True
+    except Exception as exc:  # noqa: BLE001
+        print("  onverwacht: %s: %s" % (type(exc).__name__, exc))
+        return False
+    return False
+
+
+def _robuustheid_selftest():
+    """Regressietests voor v1.1: rare bus-antwoorden (G) en einde laden (A)."""
+    h = bytes.fromhex
+    leeg = (b"", 0)
+    weigering = (h("037F223100000000"), 8)        # requestOutOfRange
+    wacht = (h("037F227800000000"), 8)            # responsePending
+    goed = (h("0462B00201000000"), 8)
+    checks = [
+        ("G: leeg frame geeft BusError",
+         _geeft_buserror(isotp_query, _NepSocket([leeg]), b"\x22\x01\x01")),
+        ("G: negatief antwoord (7F) geeft BusError",
+         _geeft_buserror(isotp_query, _NepSocket([weigering]), b"\x22\x01\x01")),
+        ("G: responsePending, daarna het echte antwoord",
+         isotp_query(_NepSocket([wacht, goed]), b"\x22\xB0\x02") == h("62B00201")),
+        ("G: responsePending zonder vervolg geeft BusError",
+         _geeft_buserror(isotp_query, _NepSocket([wacht]), b"\x22\x01\x01",
+                         timeout=0.3)),
+        ("G: read_bms met 7F geeft BusError, geen KeyError",
+         _geeft_buserror(read_bms, _NepSocket([weigering, weigering]))),
+        ("G: read_bms met leeg frame geeft BusError",
+         _geeft_buserror(read_bms, _NepSocket([leeg, leeg]))),
+        ("G: read_bms met verkeerde echo geeft BusError",
+         _geeft_buserror(read_bms, _NepSocket([(h("0462010500000000"), 8)]))),
+        ("G: read_bms met te kort antwoord geeft BusError",
+         _geeft_buserror(read_bms, _NepSocket([(h("0462010100000000"), 8)]))),
+    ]
+
+    basis = dict(soc_display=80.0, soc_bms=79.5, dc_charging=False,
+                 ignition=False, main_relay=True)
+    laden = dict(basis, hv_current=-2.0)
+    gestopt = dict(basis, hv_current=0.0)
+    vorige = time.time() - 60
+    checks += [
+        ("A: −2 A → 0 A, SOC gelijk: versturen",
+         worth_sending(gestopt, laden, vorige)[0]),
+        ("A: 0 A → −2 A, SOC gelijk: versturen",
+         worth_sending(laden, gestopt, vorige)[0]),
+        ("A: regeneratie tijdens rijden is geen laden",
+         not laadt(dict(basis, ignition=True, hv_current=-20.0))),
+        ("A: na het laden weer het idle-interval",
+         interval_for(gestopt, True)[2] == "idle"),
+    ]
+    return checks
+
+
 def selftest():
     m1 = as_map(_assemble(SELFTEST_0101))
     m5 = as_map(_assemble(SELFTEST_0105))
@@ -1018,6 +1159,13 @@ def selftest():
         ("Levenslang ~194 Wh/km",
          190 <= values["cum_energy_charged_kwh"] * 1000 / 179542 <= 198),
     ]
+
+    checks.append(("Echo en lengte 220101/220105 kloppen",
+                   not _geeft_buserror(check_antwoord, _assemble(SELFTEST_0101),
+                                       b"\x01\x01", MIN_LEN_0101)
+                   and not _geeft_buserror(check_antwoord, _assemble(SELFTEST_0105),
+                                           b"\x01\x05", MIN_LEN_0105)))
+    checks += _robuustheid_selftest()
 
     verbruik = _verbruik_selftest()
     print("verbruiksvenster met laadsessie erin: %s" % json.dumps(verbruik))

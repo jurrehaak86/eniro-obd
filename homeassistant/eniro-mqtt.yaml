@@ -291,13 +291,21 @@ mqtt:
 
   binary_sensor:
     # ------------------------------------------------------------ Kia e-Niro
-    # Laden = er loopt meer dan 1 A de accu in. Zelfde drempel als eniro-soc
-    # gebruikt om naar het laadinterval te schakelen.
+    # Laden = snelladen, of meer dan 1 A de accu in met het contact uit.
+    # Precies laadt() in eniro_soc.py; zonder de contact-voorwaarde telt elke
+    # regeneratieve rem tijdens het rijden als laden.
+    #
+    # expire_after: tijdens laden stuurt eniro-soc minstens elke 300 s een
+    # record. Valt de BMS stil, dan bewijst dat niet dat het laden gestopt is
+    # (de dongle kan slapen, de bus kan weg zijn). Na 900 s zonder record wordt
+    # de sensor daarom onbeschikbaar in plaats van 'aan' te blijven staan.
     - name: "e-Niro laadt"
       unique_id: eniro_charging
       default_entity_id: binary_sensor.e_niro_laadt
       state_topic: "autopi/obd/ev/bms"
-      value_template: "{{ 'ON' if value_json.hv_current | float(0) < -1 else 'OFF' }}"
+      value_template: >-
+        {{ 'ON' if value_json.dc_charging or (value_json.hv_current | float(0) < -1 and not value_json.ignition) else 'OFF' }}
+      expire_after: 900
       device_class: battery_charging
       device: *eniro
 
@@ -306,6 +314,7 @@ mqtt:
       default_entity_id: binary_sensor.e_niro_snelladen
       state_topic: "autopi/obd/ev/bms"
       value_template: "{{ 'ON' if value_json.dc_charging else 'OFF' }}"
+      expire_after: 900          # zie "e-Niro laadt"
       device_class: battery_charging
       device: *eniro
 
