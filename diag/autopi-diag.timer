@@ -1,0 +1,12 @@
+[Unit]
+Description=autopi-diag elke 10 minuten
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=10min
+# Spreidt de meting zodat hij niet samenvalt met de upload-worker van salt.
+RandomizedDelaySec=60
+Persistent=false
+
+[Install]
+WantedBy=timers.target

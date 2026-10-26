@@ -1,0 +1,12 @@
+[Unit]
+Description=wwan-teller - legt per boot het 4G-verbruik vast
+Documentation=file:///opt/wwan-teller/README.md
+After=autopi-ingest.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/wwan-teller/wwan_teller.py --snapshot
+StateDirectory=wwan-teller
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes

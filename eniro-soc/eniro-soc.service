@@ -1,0 +1,27 @@
+[Unit]
+Description=eniro-soc - leest de BMS van de e-Niro en stuurt het naar de ingest
+Documentation=file:///opt/eniro-soc/README.md
+After=network.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/eniro-soc.env
+ExecStart=/usr/bin/python3 /opt/eniro-soc/eniro_soc.py
+Restart=always
+RestartSec=10
+
+# Draait als root omdat een raw CAN-socket CAP_NET_RAW vereist. Verder
+# zo weinig rechten als mogelijk.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_CAN AF_NETLINK
+LockPersonality=yes
+StateDirectory=eniro-soc
+ReadWritePaths=/var/lib/eniro-soc
+
+[Install]
+WantedBy=multi-user.target

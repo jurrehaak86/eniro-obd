@@ -1,0 +1,258 @@
+# Home Assistant - helpers en automatiseringen voor de AutoPi-dongle
+#
+# WAT:
+#   - input_number.e_niro_bruikbare_capaciteit  (gebruikt door ABRP en de actieradius)
+#   - input_number.e_niro_verbruik_laatst_bekend (laatste geldige verbruik)
+#   - sensor.e_niro_actieradius                 (template: SOC x capaciteit / verbruik)
+#   - input_select.autopi_profiel               (Dagelijks / Reis)
+#   - automatisering "AutoPi - profiel naar dongle"
+#   - automatisering "AutoPi - accu kritiek"
+#   - automatisering "AutoPi - geen 4G"
+#   - automatisering "AutoPi - update mislukt"
+#   - automatisering "e-Niro - verbruik laatst bekend bewaren"
+# Leunt op eniro-mqtt.yaml alleen voor de entiteiten; de meldingen triggeren
+# direct op MQTT-topics.
+#
+# LADEN - kies een van de twee:
+#   a) Als package (aanbevolen): kopieer dit bestand naar
+#      /config/packages/eniro-autopi.yaml (zie de kop van eniro-mqtt.yaml voor
+#      de regel in configuration.yaml) en herstart Home Assistant.
+#      Automatiseringen uit een package zie je gewoon in de lijst en hun
+#      traces werken, maar bewerken doe je in dit bestand, niet in de UI.
+#   b) Via de UI (kan ook, en dan kun je alles daar bewerken):
+#      - Helpers: Instellingen > Apparaten en diensten > Helpers > Helper maken
+#          "Getal":   naam "e-Niro bruikbare capaciteit", min 50, max 80,
+#                     stap 0,5, eenheid kWh, invoerveld; daarna waarde 70.
+#          "Getal":   naam "e-Niro verbruik laatst bekend", min 50, max 400,
+#                     stap 0,1, eenheid Wh/km, invoerveld.
+#          "Template" > "Sensor": naam "e-Niro actieradius", eenheid km,
+#                     toestandsklasse meting; plak de state-template uit het
+#                     blok `template:` onderaan.
+#          "Keuzelijst": naam "AutoPi profiel", opties precies "Dagelijks" en
+#                     "Reis".
+#        Controleer daarna dat de entity-ID's
+#        input_number.e_niro_bruikbare_capaciteit en input_select.autopi_profiel
+#        zijn.
+#      - Automatiseringen: Instellingen > Automatiseringen > nieuw > drie
+#        puntjes > "Bewerken in YAML", en plak per automatisering het blok
+#        vanaf `alias:` (zonder het streepje en zonder de regel `id:`).
+#
+# MELDINGEN gaan naar een persistent notification (de bel in de zijbalk).
+# Wil je ook een pushmelding op je telefoon, voeg dan in de actions een stap
+# toe met jouw notify-dienst, bijvoorbeeld:
+#     - action: notify.mobile_app_JOUW_TELEFOON
+#       data: {title: "...", message: "..."}
+# De dienstnaam vind je onder Ontwikkelaarshulpmiddelen > Acties > "notify.".
+#
+# RETAINED: de ontvanger publiceert alles retained. Een MQTT-trigger vuurt op
+# een retained bericht zodra Home Assistant zich abonneert (bij elke herstart).
+# Daarom vergelijken de meldingen het veld @ts (UTC) met nu: ouder dan een uur
+# = geen melding.
+
+input_number:
+  # 70 kWh is drie keer onafhankelijk gemeten aan de auto waarop dit gebouwd
+  # is; de fabrieksopgave van 64 kWh is te laag. Meet bij twijfel zelf.
+  # `initial` zet de waarde bij elke herstart terug: wil je een andere
+  # capaciteit, pas dan `initial` hier aan (zonder `initial` begint een
+  # YAML-helper op het minimum, 50, en dat zou ABRP te laag voeden).
+  # Maak je de helper via de UI, dan geldt dit niet en onthoudt hij zijn waarde.
+  e_niro_bruikbare_capaciteit:
+    name: "e-Niro bruikbare capaciteit"
+    min: 50
+    max: 80
+    step: 0.5
+    unit_of_measurement: "kWh"
+    mode: box
+    icon: mdi:car-battery
+    initial: 70
+
+  # Laatste geldige verbruik over 100 km. Het MQTT-verbruik is na een herstart
+  # van Home Assistant 'unknown' tot de volgende rit: het retained BMS-bericht
+  # heeft tijdens laden/stilstand geen verbruik. Deze helper houdt de laatste
+  # waarde vast (geen `initial`, dus hij overleeft een herstart) en wordt
+  # bijgewerkt door "e-Niro - verbruik laatst bekend bewaren". Stilstaand
+  # verandert het verbruik toch niet.
+  e_niro_verbruik_laatst_bekend:
+    name: "e-Niro verbruik laatst bekend"
+    min: 50
+    max: 400
+    step: 0.1
+    unit_of_measurement: "Wh/km"
+    mode: box
+    icon: mdi:car-cruise-control
+
+input_select:
+  # Dagelijks = op 4G per topic alleen de laatste stand, elke 30 minuten in
+  # één keer (scheelt veel data). Op wifi gaat altijd alles live, en tijdens
+  # laden ook op 4G minstens elke 5 minuten.
+  # Reis = alles live, ook op 4G (voor ABRP en een lange rit).
+  # Geen `initial`: dan onthoudt Home Assistant de laatste keuze over een
+  # herstart heen.
+  autopi_profiel:
+    name: "AutoPi profiel"
+    icon: mdi:car-cog
+    options:
+      - "Dagelijks"
+      - "Reis"
+
+automation:
+  # Zet de keuze retained op MQTT. De ontvanger op de dongle leest hem bij
+  # elke (her)verbinding en onthoudt hem op schijf. Ook bij het starten van
+  # Home Assistant, zodat het retained bericht er altijd is.
+  # Let op: alleen een wissel of een herstart publiceert. Na het laden van
+  # dit bestand via "herladen" (in plaats van een herstart): wissel het
+  # profiel een keer heen en terug.
+  # Vereist op de dongle: PROFIEL_TOPIC=autopi/config/profiel in de env van
+  # de ontvanger, en leesrecht op dat topic voor zijn MQTT-gebruiker.
+  - id: eniro_obd_autopi_profiel_naar_dongle
+    alias: "AutoPi - profiel naar dongle"
+    description: "Dagelijks = op 4G elke 30 min de laatste stand; Reis = alles live."
+    mode: restart
+    triggers:
+      - trigger: state
+        entity_id: input_select.autopi_profiel
+      - trigger: homeassistant
+        event: start
+    actions:
+      - action: mqtt.publish
+        data:
+          topic: autopi/config/profiel
+          payload: "{{ states('input_select.autopi_profiel') }}"
+          qos: 1
+          retain: true
+
+  # De 12V-spanning is langer dan de ingestelde tijd onder de drempel
+  # gebleven (firmware: battery_critical_level, standaard 12,0 V / 300 s).
+  # De dongle gaat dan in hibernation en komt pas terug als de spanning
+  # herstelt. Dit topic gaat ook in profiel Dagelijks altijd direct door.
+  - id: eniro_obd_autopi_accu_kritiek
+    alias: "AutoPi - accu kritiek"
+    description: "Boordspanning onder de drempel; de dongle hibernateert en komt niet vanzelf terug."
+    mode: single
+    triggers:
+      - trigger: mqtt
+        topic: autopi/vehicle/battery/critical_level
+    conditions:
+      - condition: template
+        value_template: >-
+          {{ now().timestamp()
+             - as_timestamp(trigger.payload_json['@ts'] ~ '+00:00', 0) < 3600 }}
+    actions:
+      - action: persistent_notification.create
+        data:
+          notification_id: autopi_accu_kritiek
+          title: "AutoPi - accu kritiek"
+          message: >-
+            Boordspanning onder de drempel, de dongle gaat hibernateren.
+            {{ trigger.payload_json.get('reason', '') }}
+
+  # Meldt pas als de mobiele verbinding vijf minuten weg blijft; korte
+  # onderbrekingen (tunnel, parkeergarage) blijven stil. Komt hij terug, dan
+  # verdwijnt de melding weer.
+  - id: eniro_obd_autopi_geen_4g
+    alias: "AutoPi - geen 4G"
+    description: "Meldt als de mobiele verbinding langer dan vijf minuten weg blijft."
+    mode: restart
+    triggers:
+      - trigger: mqtt
+        topic: autopi/system/network/wwan0/offline
+      - trigger: mqtt
+        topic: autopi/system/network/wwan0/online
+    conditions:
+      - condition: template
+        value_template: >-
+          {{ now().timestamp()
+             - as_timestamp(trigger.payload_json['@ts'] ~ '+00:00', 0) < 3600 }}
+    actions:
+      - variables:
+          reden: "{{ trigger.payload_json.get('reason', 'onbekend') }}"
+      # Online: een eventuele melding weghalen en stoppen. Omdat de modus
+      # restart is, breekt een online-bericht ook het wachten hieronder af.
+      - if:
+          - condition: template
+            value_template: "{{ trigger.topic.endswith('/online') }}"
+        then:
+          - action: persistent_notification.dismiss
+            data:
+              notification_id: autopi_geen_4g
+          - stop: "Verbinding is er weer"
+      - wait_for_trigger:
+          - trigger: mqtt
+            topic: autopi/system/network/wwan0/online
+        timeout: "00:05:00"
+        continue_on_timeout: true
+      - condition: template
+        value_template: >-
+          {{ wait.trigger is none
+             or as_timestamp(wait.trigger.payload_json['@ts'] ~ '+00:00', 0)
+                < as_timestamp(trigger.payload_json['@ts'] ~ '+00:00', 0) }}
+      - action: persistent_notification.create
+        data:
+          notification_id: autopi_geen_4g
+          title: "AutoPi - geen 4G"
+          message: "Al vijf minuten geen mobiele verbinding. Reden: {{ reden }}"
+
+  # Een release-update van de firmware is mislukt. Normaal komen er geen
+  # updates (de dongle is niet aan de AutoPi-cloud gekoppeld); zie je deze
+  # melding, kijk dan wat er geprobeerd heeft te updaten.
+  - id: eniro_obd_autopi_update_mislukt
+    alias: "AutoPi - update mislukt"
+    mode: single
+    triggers:
+      - trigger: mqtt
+        topic: autopi/system/release/failed
+    conditions:
+      - condition: template
+        value_template: >-
+          {{ now().timestamp()
+             - as_timestamp(trigger.payload_json['@ts'] ~ '+00:00', 0) < 3600 }}
+    actions:
+      - action: persistent_notification.create
+        data:
+          notification_id: autopi_update_mislukt
+          title: "AutoPi - update mislukt"
+          message: "{{ trigger.payload_json.get('reason', 'Geen reden opgegeven.') }}"
+
+  # Bewaart elke geldige verbruikswaarde in de helper hierboven.
+  - id: eniro_obd_verbruik_laatst_bekend
+    alias: "e-Niro - verbruik laatst bekend bewaren"
+    mode: queued
+    triggers:
+      - trigger: state
+        entity_id: sensor.e_niro_verbruik_100_km
+        to: null
+    conditions:
+      - condition: template
+        value_template: >-
+          {{ is_number(trigger.to_state.state)
+             and 50 < trigger.to_state.state | float(0) < 400 }}
+    actions:
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.e_niro_verbruik_laatst_bekend
+        data:
+          value: "{{ trigger.to_state.state | float | round(1) }}"
+
+template:
+  # Actieradius = SOC x bruikbare capaciteit / verbruik. Rekent met het live
+  # verbruik als dat bekend is, anders met het laatst bekende; zo stijgt hij
+  # mee tijdens het laden. Pas na de eerste 100 km rijden is er een verbruik;
+  # tot dan 'onbekend' (of vul de helper een keer met de hand, bv. 150).
+  # Vergeleken met de opgave van de auto zelf: binnen een paar procent.
+  - sensor:
+      - name: "e-Niro actieradius"
+        unique_id: eniro_obd_actieradius
+        unit_of_measurement: "km"
+        state_class: measurement
+        icon: mdi:map-marker-distance
+        state: >-
+          {% set soc = states('sensor.e_niro_soc') | float(0) %}
+          {% set cap = states('input_number.e_niro_bruikbare_capaciteit') | float(70) %}
+          {% set live = states('sensor.e_niro_verbruik_100_km') %}
+          {% set wh = live | float(0) if is_number(live)
+             else states('input_number.e_niro_verbruik_laatst_bekend') | float(0) %}
+          {% if soc > 0 and wh > 50 %}
+            {{ ((soc / 100 * cap * 1000) / wh) | round(0) }}
+          {% else %}
+            {{ none }}
+          {% endif %}

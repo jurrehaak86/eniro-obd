@@ -1,0 +1,12 @@
+[Unit]
+Description=autopi-wakelock elke 5 minuten
+
+[Timer]
+OnBootSec=3min
+# Vijf minuten, want de kortste sleep timer in engines.conf is 15 minuten
+# (engine_stopped). Tien zou te krap zijn.
+OnUnitActiveSec=5min
+Persistent=false
+
+[Install]
+WantedBy=timers.target

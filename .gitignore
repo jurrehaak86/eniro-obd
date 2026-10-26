@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+
+# Nooit committen: echte configuratie. Alleen de .example-bestanden horen erin.
+*.env
+!*.env.example
+*.secret

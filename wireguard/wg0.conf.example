@@ -1,0 +1,42 @@
+# /etc/wireguard/wg0.conf op de AutoPi - chmod 600, root:root
+#
+# Voorbeeld voor een split tunnel naar alleen je MQTT-broker. Begin met de
+# .conf die je VPN-server (router, firewall of eigen WireGuard-server) voor
+# deze client genereert, en pas daarin twee dingen aan:
+#
+#   AllowedIPs  0.0.0.0/0  ->  <BROKER_IP>/32
+#     Alleen de MQTT-broker gaat door de tunnel. Met 0.0.0.0/0 loopt AL het
+#     verkeer van de dongle via huis, en valt de tunnel weg dan heeft de dongle
+#     helemaal geen internet meer. Met alleen de broker blijft al het andere
+#     gewoon werken, ook als de tunnel even weg is.
+#
+#   Geen DNS-regel
+#     Die zou de DNS van de dongle naar een resolver in je thuisnetwerk zetten,
+#     maar die is door de tunnel niet bereikbaar (alleen de broker is dat).
+#     Bovendien vereist wg-quick daarvoor 'resolvconf', en dat staat niet op
+#     de AutoPi-image. Haal hem dus weg als je server er een meegeeft.
+#
+# Geen PersistentKeepalive: de dongle begint zelf elk gesprek (hij publiceert
+# alleen), dus er hoeft niets binnen te komen zonder dat hij eerst iets
+# stuurde. Een keepalive om de 25 seconden zou ~9 KB per uur kosten voor niets.
+#
+# MTU op de standaard laten: MQTT-berichten zijn een paar honderd bytes.
+#
+# Placeholders:
+#   <DONGLE_PRIVATE_KEY>  privésleutel van deze client (van je VPN-server,
+#                         of zelf gemaakt met: wg genkey)
+#   <DONGLE_TUNNEL_IP>    tunneladres van de dongle, bijv. 10.0.99.8/32
+#   <SERVER_PUBLIC_KEY>   publieke sleutel van je VPN-server
+#   <PRESHARED_KEY>       optioneel; regel weglaten als je er geen gebruikt
+#   <BROKER_IP>           LAN-adres van je MQTT-broker, bijv. 192.168.1.10
+#   <VPN_HOSTNAAM>:<POORT> publieke naam (DDNS) en poort van je VPN-server
+
+[Interface]
+PrivateKey = <DONGLE_PRIVATE_KEY>
+Address = <DONGLE_TUNNEL_IP>
+
+[Peer]
+PublicKey = <SERVER_PUBLIC_KEY>
+PresharedKey = <PRESHARED_KEY>
+AllowedIPs = <BROKER_IP>/32
+Endpoint = <VPN_HOSTNAAM>:<POORT>

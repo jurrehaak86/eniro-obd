@@ -1,0 +1,9 @@
+[Unit]
+Description=wg-reresolve elke 5 minuten
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+
+[Install]
+WantedBy=timers.target

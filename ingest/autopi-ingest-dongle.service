@@ -1,0 +1,30 @@
+[Unit]
+Description=AutoPi ingest (lokaal op de dongle) - uploads via WireGuard naar MQTT
+Documentation=file:///opt/autopi-ingest/README.md
+After=network.target wg-quick@wg0.service
+
+[Service]
+Type=simple
+User=autopi-ingest
+Group=autopi-ingest
+EnvironmentFile=/etc/autopi-ingest.env
+# Systeem-Python met python3-paho-mqtt uit apt (1.4.0 op buster); geen venv.
+ExecStart=/usr/bin/python3 /opt/autopi-ingest/autopi_ingest.py
+Restart=always
+RestartSec=5
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+StateDirectory=autopi-ingest
+
+[Install]
+WantedBy=multi-user.target

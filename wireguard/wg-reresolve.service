@@ -1,0 +1,7 @@
+[Unit]
+Description=wg-reresolve - houdt wg0 op en de endpoint actueel
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/wg-reresolve.sh

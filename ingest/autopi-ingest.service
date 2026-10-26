@@ -1,0 +1,33 @@
+[Unit]
+Description=AutoPi ingest - ontvangt dongle-uploads en zet ze op MQTT
+Documentation=file:///opt/autopi-ingest/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=autopi
+Group=autopi
+EnvironmentFile=/etc/autopi-ingest.env
+ExecStart=/opt/autopi-ingest/venv/bin/python /opt/autopi-ingest/autopi_ingest.py
+Restart=always
+RestartSec=5
+
+# Hardening - de dienst hoeft vrijwel niets te mogen
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+StateDirectory=autopi-ingest
+ReadWritePaths=/var/lib/autopi-ingest
+
+[Install]
+WantedBy=multi-user.target

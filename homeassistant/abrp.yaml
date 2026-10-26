@@ -1,0 +1,77 @@
+# Home Assistant - live telemetrie naar A Better Routeplanner (ABRP), optioneel
+#
+# WAT: de rest_command die de telemetrie verstuurt en de automatisering die
+# hem aanroept. Drie delen samen:
+#   1. dit bestand
+#   2. de URL-template in je eigen secrets.yaml - zie secrets.example.yaml
+#   3. eniro-mqtt.yaml (de sensoren) en eniro-autopi.yaml (de helper
+#      input_number.e_niro_bruikbare_capaciteit)
+# Alle gegevens komen van de dongle: SOC, vermogen, spanning, temperatuur,
+# laden, positie, snelheid, hoogte, koers en kilometerstand. Er is geen
+# fabrieksintegratie of cloudkoppeling van de auto nodig.
+#
+# LADEN - kies een van de twee:
+#   a) Als package (aanbevolen): kopieer dit bestand naar
+#      /config/packages/abrp.yaml (zie de kop van eniro-mqtt.yaml) en herstart.
+#   b) Zonder packages: zet het blok `rest_command:` in configuration.yaml
+#      (heb je die sleutel al, dan alleen de regels eronder), en plak de
+#      automatisering via de UI: Instellingen > Automatiseringen > nieuw >
+#      drie puntjes > "Bewerken in YAML", het blok vanaf `alias:` zonder het
+#      streepje en zonder de regel `id:`. Een tweede `automation:`-sleutel
+#      naast `automation: !include automations.yaml` geeft een fout.
+#
+# Waarom de hele URL in secrets.yaml staat: de API-key en het token moeten in
+# de URL, en een !secret kan niet midden in een template. Home Assistant vult
+# secrets in VOORDAT de template wordt uitgerekend. Door de complete template
+# als secret op te slaan staan key en token nergens in je config.
+#
+# Testen: Ontwikkelaarshulpmiddelen > Acties > rest_command.update_abrp_kia_niro
+# uitvoeren. In de ABRP-app hoort bij je voertuig bron "Api" en
+# "< 1 min geleden" te staan, met een kilometerstand die klopt (niet 0).
+
+rest_command:
+  update_abrp_kia_niro:
+    method: POST
+    content_type: "application/x-www-form-urlencoded; charset=utf-8"
+    url: !secret abrp_kia_niro_telemetry_url
+    # ABRP leest alles uit de URL; de body is alleen nodig omdat het een POST is.
+    payload: "dummy=1"
+
+# De triggers zijn een voorstel - pas ze aan. De eerste CONDITIE is niet
+# optioneel: zonder die regel maakt | float(0) van een unknown- of
+# unavailable-SOC een SOC van 0%, en dat gebeurt bij elke herstart van Home
+# Assistant. ABRP gooit dan je routeplanning om.
+# In profiel Dagelijks komen de gegevens op 4G maar elke 30 minuten binnen;
+# zet voor een rit met ABRP het profiel op Reis (input_select.autopi_profiel).
+automation:
+  - id: eniro_obd_abrp_telemetrie
+    alias: "ABRP - e-Niro telemetrie"
+    mode: single
+    triggers:
+      - trigger: state
+        entity_id: sensor.e_niro_soc
+      - trigger: state
+        entity_id:
+          - binary_sensor.e_niro_laadt
+          - binary_sensor.e_niro_snelladen
+      - trigger: time_pattern
+        minutes: "/5"
+    conditions:
+      - condition: not
+        conditions:
+          - condition: state
+            entity_id: sensor.e_niro_soc
+            state: ["unknown", "unavailable"]
+      # Elke vijf minuten alleen als er iets gebeurt: laden of rijden.
+      - condition: or
+        conditions:
+          - condition: template
+            value_template: "{{ trigger.platform != 'time_pattern' }}"
+          - condition: state
+            entity_id: binary_sensor.e_niro_laadt
+            state: "on"
+          - condition: state
+            entity_id: binary_sensor.e_niro_contact
+            state: "on"
+    actions:
+      - action: rest_command.update_abrp_kia_niro
