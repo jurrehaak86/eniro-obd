@@ -1,0 +1,340 @@
+{
+  "_comment": [
+    "Bron van waarheid voor alle MQTT-entiteiten van eniro-obd: twee apparaten (Kia e-Niro en AutoPi dongle) met hun sensoren.",
+    "Twee manieren om dit in Home Assistant te krijgen: (1) MQTT Discovery: de ontvanger op de dongle publiceert dit bestand (HA_DISCOVERY=1 in /etc/autopi-ingest.env); (2) YAML: scripts/gen_ha_yaml.py maakt er homeassistant/eniro-mqtt.yaml van. Gebruik er één, niet allebei (dubbele unique_id's).",
+    "Opbouw: devices -> <apparaat-id> -> device (het apparaat in HA) en components -> <unique_id> -> de opties van één entiteit, met dezelfde namen als in de MQTT-documentatie van Home Assistant (state_topic, value_template, unit_of_measurement, ...). 'platform' is sensor, binary_sensor of device_tracker. Velden die met _ beginnen (zoals _comment) zijn uitleg en gaan niet mee.",
+    "Topics: hier staat steeds het standaardprefix autopi/. De ontvanger vervangt dat door zijn MQTT_PREFIX, en autopi/dongle/status door zijn STATUS_TOPIC. autopi/obd/ev/bms = eniro-soc, autopi/obd/bat = 12V van de dongle, autopi/track/pos = GPS, autopi/device/diag = diag/, autopi/dongle/status = last-will van de ontvanger.",
+    "Geen availability_topic, met opzet: de last-will vuurt elke keer dat de dongle gaat slapen, en dan zou de SOC onbeschikbaar worden zodra de auto geparkeerd staat. Nu blijft de laatste waarde staan (retained); de leeftijd zie je aan het attribuut @ts van de SOC-sensor en aan 'AutoPi laatste meting'. Of de dongle wakker is, zegt binary_sensor.autopi_dongle_online.",
+    "Entity-ID's: elke entiteit heeft een vaste default_entity_id. Bij een verse installatie krijg je precies die ID's, en daar rekenen abrp.yaml, secrets.example.yaml en eniro-autopi.yaml op. Bestaat een ID al, dan maakt Home Assistant er stil _2 van.",
+    "Aanpassen: naam, entity-ID, icoon en gebied kun je gewoon in de UI van HA wijzigen. Template, eenheid of topic wijzig je hier; daarna de dongle bijwerken (install.sh) of bij YAML scripts/gen_ha_yaml.py draaien. Een unique_id verander je nooit: dan maakt HA een nieuwe entiteit zonder geschiedenis."
+  ],
+  "devices": {
+    "kia_eniro_bms": {
+      "_comment": "Accu, laden, kilometerstand, verbruik en locatie. Bron: eniro-soc (BMS en cluster via OBD) en de GPS van de dongle.",
+      "device": {
+        "identifiers": [
+          "kia_eniro_bms"
+        ],
+        "name": "Kia e-Niro",
+        "manufacturer": "Kia",
+        "model": "e-Niro 64 kWh"
+      },
+      "components": {
+        "eniro_soc_display": {
+          "platform": "sensor",
+          "_comment": "Alle velden van het BMS-record komen als attributen mee, inclusief @ts (UTC, het moment van meten).",
+          "name": "SOC",
+          "unique_id": "eniro_soc_display",
+          "default_entity_id": "sensor.e_niro_soc",
+          "state_topic": "autopi/obd/ev/bms",
+          "value_template": "{{ value_json.soc_display }}",
+          "json_attributes_topic": "autopi/obd/ev/bms",
+          "unit_of_measurement": "%",
+          "device_class": "battery",
+          "state_class": "measurement"
+        },
+        "eniro_soc_bms": {
+          "platform": "sensor",
+          "name": "SOC BMS",
+          "unique_id": "eniro_soc_bms",
+          "default_entity_id": "sensor.e_niro_soc_bms",
+          "state_topic": "autopi/obd/ev/bms",
+          "value_template": "{{ value_json.soc_bms }}",
+          "unit_of_measurement": "%",
+          "device_class": "battery",
+          "state_class": "measurement",
+          "entity_category": "diagnostic"
+        },
+        "eniro_hv_power": {
+          "platform": "sensor",
+          "_comment": "Positief = er gaat energie de accu in (laden). eniro-soc levert het omgekeerde teken (stroom negatief bij laden), vandaar de * -1.",
+          "name": "Accuvermogen",
+          "unique_id": "eniro_hv_power",
+          "default_entity_id": "sensor.e_niro_accuvermogen",
+          "state_topic": "autopi/obd/ev/bms",
+          "value_template": "{{ (value_json.hv_power | float(0) * -1) | round(2) }}",
+          "unit_of_measurement": "kW",
+          "device_class": "power",
+          "state_class": "measurement"
+        },
+        "eniro_hv_voltage": {
+          "platform": "sensor",
+          "name": "Accuspanning",
+          "unique_id": "eniro_hv_voltage",
+          "default_entity_id": "sensor.e_niro_accuspanning",
+          "state_topic": "autopi/obd/ev/bms",
+          "value_template": "{{ value_json.hv_voltage }}",
+          "unit_of_measurement": "V",
+          "device_class": "voltage",
+          "state_class": "measurement"
+        },
+        "eniro_hv_current": {
+          "platform": "sensor",
+          "name": "Accustroom",
+          "unique_id": "eniro_hv_current",
+          "default_entity_id": "sensor.e_niro_accustroom",
+          "state_topic": "autopi/obd/ev/bms",
+          "value_template": "{{ value_json.hv_current }}",
+          "unit_of_measurement": "A",
+          "device_class": "current",
+          "state_class": "measurement",
+          "entity_category": "diagnostic"
+        },
+        "eniro_batt_temp": {
+          "platform": "sensor",
+          "name": "Accutemperatuur",
+          "unique_id": "eniro_batt_temp",
+          "default_entity_id": "sensor.e_niro_accutemperatuur",
+          "state_topic": "autopi/obd/ev/bms",
+          "value_template": "{{ value_json.batt_temp_min }}",
+          "unit_of_measurement": "°C",
+          "device_class": "temperature",
+          "state_class": "measurement"
+        },
+        "eniro_batt_temp_max": {
+          "platform": "sensor",
+          "name": "Accutemperatuur max",
+          "unique_id": "eniro_batt_temp_max",
+          "default_entity_id": "sensor.e_niro_accutemperatuur_max",
+          "state_topic": "autopi/obd/ev/bms",
+          "value_template": "{{ value_json.batt_temp_max }}",
+          "unit_of_measurement": "°C",
+          "device_class": "temperature",
+          "state_class": "measurement",
+          "entity_category": "diagnostic"
+        },
+        "eniro_aux_voltage": {
+          "platform": "sensor",
+          "_comment": "De 12V-spanning zoals de BMS hem meet. De dongle meet hem ook zelf (sensor.autopi_12v_spanning); die loopt door als de auto slaapt.",
+          "name": "12V boordspanning",
+          "unique_id": "eniro_aux_voltage",
+          "default_entity_id": "sensor.e_niro_12v_boordspanning",
+          "state_topic": "autopi/obd/ev/bms",
+          "value_template": "{{ value_json.aux_voltage }}",
+          "unit_of_measurement": "V",
+          "device_class": "voltage",
+          "state_class": "measurement",
+          "entity_category": "diagnostic"
+        },
+        "eniro_cell_v_deviation": {
+          "platform": "sensor",
+          "name": "Celafwijking",
+          "unique_id": "eniro_cell_v_deviation",
+          "default_entity_id": "sensor.e_niro_celafwijking",
+          "state_topic": "autopi/obd/ev/bms",
+          "value_template": "{{ value_json.cell_v_deviation }}",
+          "unit_of_measurement": "V",
+          "device_class": "voltage",
+          "state_class": "measurement",
+          "entity_category": "diagnostic"
+        },
+        "eniro_cum_energy_charged": {
+          "platform": "sensor",
+          "name": "Totaal geladen",
+          "unique_id": "eniro_cum_energy_charged",
+          "default_entity_id": "sensor.e_niro_totaal_geladen",
+          "state_topic": "autopi/obd/ev/bms",
+          "value_template": "{{ value_json.cum_energy_charged_kwh }}",
+          "unit_of_measurement": "kWh",
+          "device_class": "energy",
+          "state_class": "total_increasing"
+        },
+        "eniro_cum_energy_used": {
+          "platform": "sensor",
+          "name": "Totaal verbruikt",
+          "unique_id": "eniro_cum_energy_used",
+          "default_entity_id": "sensor.e_niro_totaal_verbruikt",
+          "state_topic": "autopi/obd/ev/bms",
+          "value_template": "{{ value_json.cum_energy_used_kwh }}",
+          "unit_of_measurement": "kWh",
+          "device_class": "energy",
+          "state_class": "total_increasing"
+        },
+        "eniro_odometer": {
+          "platform": "sensor",
+          "_comment": [
+            "De instrumentencluster antwoordt alleen met het contact aan. In records zonder cluster-antwoord (laden, stilstand) stuurt eniro-soc de laatst bekende kilometerstand mee uit zijn verbruiksgeschiedenis; attribuut odometer_bron van de SOC-sensor zegt 'cluster' of 'opgeslagen'. Daardoor heeft het retained bericht de kilometerstand ook na een herstart van Home Assistant, en is er geen template meer nodig die de vorige waarde vasthoudt.",
+            "Ontbreekt het veld toch (nog geen geschiedenis op de dongle, bijvoorbeeld vóór de eerste rit), dan 'None' (= unknown) in plaats van de tekst 'unknown', die een \"non-numeric value\"-fout geeft.",
+            "ABRP leest deze sensor voor `odometer`. Hernoem je hem, pas dan ook de entity-ID in secrets.yaml aan."
+          ],
+          "name": "Kilometerstand",
+          "unique_id": "eniro_odometer",
+          "default_entity_id": "sensor.e_niro_kilometerstand",
+          "state_topic": "autopi/obd/ev/bms",
+          "value_template": "{{ value_json.odometer_km if 'odometer_km' in value_json else 'None' }}",
+          "unit_of_measurement": "km",
+          "device_class": "distance",
+          "state_class": "total_increasing"
+        },
+        "eniro_verbruik_100": {
+          "platform": "sensor",
+          "_comment": "Netto verbruik over de laatste 100 km (regeneratie eraf, laadsessies niet), berekend door eniro-soc. Verschijnt pas na 100 km rijden. Zonder cluster-antwoord (laden, stilstand) stuurt eniro-soc het laatst berekende verbruik mee uit zijn geschiedenis, dus ook na een herstart van Home Assistant is er meteen een waarde. Ontbreekt het veld, dan 'None' (= unknown).",
+          "name": "Verbruik 100 km",
+          "unique_id": "eniro_verbruik_100",
+          "default_entity_id": "sensor.e_niro_verbruik_100_km",
+          "state_topic": "autopi/obd/ev/bms",
+          "value_template": "{{ value_json.wh_per_km_100 if 'wh_per_km_100' in value_json else 'None' }}",
+          "unit_of_measurement": "Wh/km",
+          "state_class": "measurement"
+        },
+        "eniro_soh": {
+          "platform": "sensor",
+          "name": "State of Health",
+          "unique_id": "eniro_soh",
+          "default_entity_id": "sensor.e_niro_state_of_health",
+          "state_topic": "autopi/obd/ev/bms",
+          "value_template": "{{ value_json.soh }}",
+          "unit_of_measurement": "%",
+          "state_class": "measurement",
+          "entity_category": "diagnostic"
+        },
+        "eniro_charging": {
+          "platform": "binary_sensor",
+          "_comment": [
+            "Laden = snelladen, of meer dan 1 A de accu in met het contact uit. Precies laadt() in eniro_soc.py; zonder de contact-voorwaarde telt elke regeneratieve rem tijdens het rijden als laden.",
+            "expire_after: tijdens laden stuurt eniro-soc minstens elke 300 s een record. Valt de BMS stil, dan bewijst dat niet dat het laden gestopt is (de dongle kan slapen, de bus kan weg zijn). Na 900 s zonder record wordt de sensor daarom onbeschikbaar in plaats van 'aan' te blijven staan."
+          ],
+          "name": "Laadt",
+          "unique_id": "eniro_charging",
+          "default_entity_id": "binary_sensor.e_niro_laadt",
+          "state_topic": "autopi/obd/ev/bms",
+          "value_template": "{{ 'ON' if value_json.dc_charging or (value_json.hv_current | float(0) < -1 and not value_json.ignition) else 'OFF' }}",
+          "expire_after": 900,
+          "device_class": "battery_charging"
+        },
+        "eniro_dc_charging": {
+          "platform": "binary_sensor",
+          "_comment": "expire_after: zie \"e-Niro laadt\".",
+          "name": "Snelladen",
+          "unique_id": "eniro_dc_charging",
+          "default_entity_id": "binary_sensor.e_niro_snelladen",
+          "state_topic": "autopi/obd/ev/bms",
+          "value_template": "{{ 'ON' if value_json.dc_charging else 'OFF' }}",
+          "expire_after": 900,
+          "device_class": "battery_charging"
+        },
+        "eniro_ignition": {
+          "platform": "binary_sensor",
+          "name": "Contact",
+          "unique_id": "eniro_ignition",
+          "default_entity_id": "binary_sensor.e_niro_contact",
+          "state_topic": "autopi/obd/ev/bms",
+          "value_template": "{{ 'ON' if value_json.ignition else 'OFF' }}",
+          "device_class": "power"
+        },
+        "eniro_locatie": {
+          "platform": "device_tracker",
+          "_comment": [
+            "Controleer eerst met \"Luisteren naar een topic\" (autopi/track/pos) of de payload loc.lat / loc.lon / alt / sog / cog bevat; de veldnamen kunnen per firmwareversie verschillen. sog is in km/h.",
+            "'home' als de auto binnen 100 m van zone.home staat."
+          ],
+          "name": "Locatie",
+          "unique_id": "eniro_locatie",
+          "default_entity_id": "device_tracker.e_niro_locatie",
+          "state_topic": "autopi/track/pos",
+          "value_template": "{% set d = distance(value_json.loc.lat, value_json.loc.lon) %} {{ 'home' if d is not none and d < 0.1 else 'not_home' }}",
+          "json_attributes_topic": "autopi/track/pos",
+          "json_attributes_template": "{{ {'latitude': value_json.loc.lat,\n    'longitude': value_json.loc.lon,\n    'altitude': value_json.alt,\n    'speed': value_json.sog,\n    'heading': value_json.cog,\n    'fix': value_json.fix,\n    'satellites': (value_json.nsat | int(0)) + (value_json.nsat_glonass | int(0)),\n    'gemeten': value_json['@ts']} | to_json }}",
+          "source_type": "gps"
+        }
+      }
+    },
+    "autopi_dongle": {
+      "_comment": "De dongle zelf: 12V-accu, 4G-verbinding en 'dongle online'.",
+      "device": {
+        "identifiers": [
+          "autopi_dongle"
+        ],
+        "name": "AutoPi dongle",
+        "manufacturer": "AutoPi",
+        "model": "TMU CM4"
+      },
+      "components": {
+        "autopi_12v_voltage": {
+          "platform": "sensor",
+          "_comment": "De 12V-metingen van de dongle zelf. Lopen ook door als de auto slaapt, zolang de dongle wakker is.",
+          "name": "12V spanning",
+          "unique_id": "autopi_12v_voltage",
+          "default_entity_id": "sensor.autopi_12v_spanning",
+          "state_topic": "autopi/obd/bat",
+          "value_template": "{{ value_json.voltage }}",
+          "unit_of_measurement": "V",
+          "device_class": "voltage",
+          "state_class": "measurement"
+        },
+        "autopi_12v_level": {
+          "platform": "sensor",
+          "name": "12V niveau",
+          "unique_id": "autopi_12v_level",
+          "default_entity_id": "sensor.autopi_12v_niveau",
+          "state_topic": "autopi/obd/bat",
+          "value_template": "{{ value_json.level }}",
+          "unit_of_measurement": "%",
+          "device_class": "battery",
+          "state_class": "measurement"
+        },
+        "autopi_12v_state": {
+          "platform": "sensor",
+          "name": "12V laadstatus",
+          "unique_id": "autopi_12v_state",
+          "default_entity_id": "sensor.autopi_12v_laadstatus",
+          "state_topic": "autopi/obd/bat",
+          "value_template": "{{ value_json.state }}",
+          "icon": "mdi:car-battery"
+        },
+        "autopi_last_measurement": {
+          "platform": "sensor",
+          "_comment": "@ts is UTC zonder tijdzone; de +00:00 maakt er een geldige timestamp van.",
+          "name": "Laatste meting",
+          "unique_id": "autopi_last_measurement",
+          "default_entity_id": "sensor.autopi_laatste_meting",
+          "state_topic": "autopi/obd/bat",
+          "value_template": "{{ value_json['@ts'] }}+00:00",
+          "device_class": "timestamp"
+        },
+        "autopi_rsrp": {
+          "platform": "sensor",
+          "_comment": "Van diag/ (autopi-diag.timer). Zonder diag blijven deze drie leeg.",
+          "name": "4G signaal",
+          "unique_id": "autopi_rsrp",
+          "default_entity_id": "sensor.autopi_4g_signaal",
+          "state_topic": "autopi/device/diag",
+          "value_template": "{{ value_json.rsrp | default(none) }}",
+          "json_attributes_topic": "autopi/device/diag",
+          "unit_of_measurement": "dBm",
+          "device_class": "signal_strength",
+          "state_class": "measurement"
+        },
+        "autopi_snr": {
+          "platform": "sensor",
+          "name": "4G ruisverhouding",
+          "unique_id": "autopi_snr",
+          "default_entity_id": "sensor.autopi_4g_ruisverhouding",
+          "state_topic": "autopi/device/diag",
+          "value_template": "{{ value_json.snr | default(none) }}",
+          "unit_of_measurement": "dB",
+          "state_class": "measurement"
+        },
+        "autopi_operator": {
+          "platform": "sensor",
+          "name": "Netwerk",
+          "unique_id": "autopi_operator",
+          "default_entity_id": "sensor.autopi_netwerk",
+          "state_topic": "autopi/device/diag",
+          "value_template": "{{ value_json.operator | default('onbekend') }} ({{ value_json.rat | default('?') | upper }})"
+        },
+        "autopi_dongle_online": {
+          "platform": "binary_sensor",
+          "_comment": "Het gezondheidssignaal van de dongle. Netjes gaan slapen = meteen offline; spanning abrupt weg = offline na ~7,5 min (1,5 x de keepalive van 300 s). Volgt STATUS_TOPIC van de ontvanger op de dongle (standaard autopi/dongle/status).",
+          "name": "Online",
+          "unique_id": "autopi_dongle_online",
+          "default_entity_id": "binary_sensor.autopi_dongle_online",
+          "state_topic": "autopi/dongle/status",
+          "payload_on": "online",
+          "payload_off": "offline",
+          "device_class": "connectivity"
+        }
+      }
+    }
+  }
+}

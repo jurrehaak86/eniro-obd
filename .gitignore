@@ -5,4 +5,7 @@ __pycache__/
 # Nooit committen: echte configuratie. Alleen de .example-bestanden horen erin.
 *.env
 !*.env.example
+# config.env van install.sh, ook exports en kopieën ervan
+config.env*
+!config.env.example
 *.secret

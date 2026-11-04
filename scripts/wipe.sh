@@ -11,7 +11,8 @@
 # je logs. Lees het door voor je het draait - je kunt het niet terugdraaien.
 #
 # Ook meegenomen: de WireGuard-sleutels, het MQTT-wachtwoord van de lokale
-# ontvanger, de status- en tellerbestanden en het persistente journal.
+# ontvanger, de status- en tellerbestanden, het journal en de rsyslog-logs, en de
+# config.env en backups van install.sh.
 set -u
 
 DOEN=0
@@ -29,6 +30,7 @@ done
 doe() {
     if [ "$DOEN" -eq 1 ]; then
         echo "   > $*"
+        # shellcheck disable=SC2294  # bewust: de commando's komen als tekst binnen
         eval "$@"
     else
         echo "   zou doen: $*"
@@ -113,12 +115,35 @@ kop "3. Eigen configuratie terug naar de template"
 # het geheime pad).
 for f in /etc/eniro-soc.env /etc/eniro-soc.secret /etc/autopi-ingest.env \
          /etc/eniro-soc.*.bak* /etc/autopi-ingest.env.bak* \
-         /etc/salt/minion.d/engines.conf.bak*; do
+         /etc/salt/minion.d/engines.conf.bak* /etc/salt/minion.d/engines.conf.orig; do
     [ -e "$f" ] || continue
     doe "shred -u '$f' 2>/dev/null || rm -f '$f'"
 done
 echo "   let op: zet na afloop een verse .env terug uit eniro-soc.env.example"
 echo "   en autopi-ingest-dongle.env.example"
+# Backups die install.sh (v1.2+) maakte: <bestand>.bak-<datum>-<tijd>. Ze
+# bevatten de oude wachtwoorden, sleutels en hotspot-PSK.
+while IFS= read -r f; do
+    doe "shred -u '$f' 2>/dev/null || rm -f '$f'"
+done < <(find /etc /home/pi /root /usr/local/sbin /opt -xdev -type f -name '*.bak-[0-9]*-[0-9]*' 2>/dev/null)
+
+kop "3a. config.env van install.sh"
+# config.env bevat ALLE geheimen in een bestand: wifi, hotspot, MQTT, WireGuard.
+# Zoek hem in de kloon van de repository (en eventuele exports ernaast).
+HIER=$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)
+gezien=" "
+for f in "$HIER"/config.env* /home/pi/eniro-obd/config.env* /root/eniro-obd/config.env*; do
+    [ -f "$f" ] || continue
+    case "$f" in *.example) continue ;; esac
+    echt=$(readlink -f "$f")
+    case "$gezien" in *" $echt "*) continue ;; esac
+    gezien="$gezien$echt "
+    doe "shred -u '$echt' 2>/dev/null || rm -f '$echt'"
+done
+for f in /var/lib/eniro-obd-install /var/log/eniro-obd-install-*.log; do
+    [ -e "$f" ] || continue
+    doe "rm -rf '$f'"
+done
 
 kop "3b. WireGuard - sleutels en endpoint"
 # wg0.conf bevat de privesleutel van de dongle (en eventueel een PSK);
@@ -138,7 +163,7 @@ fi
 kop "4. Meetgegevens - ritten, kilometerstand, locaties"
 # De diag-buffer bevat cell-ID's, de spool bevat kilometerstanden.
 # /var/lib/eniro-soc: spool, verbruik.jsonl, status.json, geladen-sinds-punt.
-# /var/lib/autopi-ingest: profiel (en bij de servervariant ruwe payloads).
+# /var/lib/autopi-ingest: profiel, discovery-hash (en bij de servervariant ruwe payloads).
 # /var/lib/wwan-teller: 4G-verbruik per boot, piek-log met open verbindingen.
 for d in /var/lib/eniro-soc /var/lib/autopi-diag /var/lib/autopi-wakelock \
          /var/lib/autopi-ingest /var/lib/wwan-teller; do
@@ -162,6 +187,9 @@ if [ -d /var/log/journal ]; then
 fi
 doe "find /var/log -type f -name '*.gz' -delete"
 doe "find /var/log -type f \\( -name '*.1' -o -name '*.old' \\) -delete"
+# rsyslog schrijft dezelfde regels ook naar platte tekst (/var/log/syslog,
+# daemon.log, messages, ...). Daarin staat net zoveel als in het journal.
+doe "find /var/log -type f \\( -name syslog -o -name messages -o -name '*.log' \\) -exec truncate -s 0 {} +"
 
 kop "7. Shell-geschiedenis"
 for h in /root/.bash_history /home/pi/.bash_history /root/.python_history /home/pi/.python_history; do

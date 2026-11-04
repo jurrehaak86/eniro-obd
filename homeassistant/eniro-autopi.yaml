@@ -6,17 +6,16 @@
 #   - sensor.e_niro_actieradius                 (template: SOC x capaciteit / verbruik)
 #   - input_select.autopi_profiel               (Dagelijks / Reis)
 #   - automatisering "AutoPi - profiel naar dongle"
-#   - automatisering "AutoPi - accu kritiek"
 #   - automatisering "AutoPi - geen 4G"
 #   - automatisering "AutoPi - update mislukt"
 #   - automatisering "e-Niro - verbruik laatst bekend bewaren"
-# Leunt op eniro-mqtt.yaml alleen voor de entiteiten; de meldingen triggeren
-# direct op MQTT-topics.
+# Leunt op de MQTT-sensoren (MQTT Discovery of eniro-mqtt.yaml) alleen voor
+# de entiteiten; de meldingen triggeren direct op MQTT-topics.
 #
 # LADEN - kies een van de twee:
 #   a) Als package (aanbevolen): kopieer dit bestand naar
-#      /config/packages/eniro-autopi.yaml (zie de kop van eniro-mqtt.yaml voor
-#      de regel in configuration.yaml) en herstart Home Assistant.
+#      /config/packages/eniro-autopi.yaml (zie INSTALLATIE 7.2 voor de regel
+#      in configuration.yaml) en herstart Home Assistant.
 #      Automatiseringen uit een package zie je gewoon in de lijst en hun
 #      traces werken, maar bewerken doe je in dit bestand, niet in de UI.
 #   b) Via de UI (kan ook, en dan kun je alles daar bewerken):
@@ -66,12 +65,12 @@ input_number:
     icon: mdi:car-battery
     initial: 70
 
-  # Laatste geldige verbruik over 100 km. Het MQTT-verbruik is na een herstart
-  # van Home Assistant 'unknown' tot de volgende rit: het retained BMS-bericht
-  # heeft tijdens laden/stilstand geen verbruik. Deze helper houdt de laatste
-  # waarde vast (geen `initial`, dus hij overleeft een herstart) en wordt
-  # bijgewerkt door "e-Niro - verbruik laatst bekend bewaren". Stilstaand
-  # verandert het verbruik toch niet.
+  # Laatste geldige verbruik over 100 km. Sinds v1.2 stuurt eniro-soc het
+  # laatst berekende verbruik ook tijdens laden/stilstand mee, dus na een
+  # herstart is het MQTT-verbruik er meteen. Deze helper blijft het vangnet
+  # voor wanneer het toch ontbreekt (eerste 100 km, oude eniro-soc, geen
+  # geschiedenis op de dongle). Geen `initial`, dus hij overleeft een herstart;
+  # bijgewerkt door "e-Niro - verbruik laatst bekend bewaren".
   e_niro_verbruik_laatst_bekend:
     name: "e-Niro verbruik laatst bekend"
     min: 50
@@ -120,31 +119,6 @@ automation:
           payload: "{{ states('input_select.autopi_profiel') }}"
           qos: 1
           retain: true
-
-  # De 12V-spanning is langer dan de ingestelde tijd onder de drempel
-  # gebleven (firmware: battery_critical_level, standaard 12,0 V / 300 s).
-  # De dongle gaat dan in hibernation en komt pas terug als de spanning
-  # herstelt. Dit topic gaat ook in profiel Dagelijks altijd direct door.
-  - id: eniro_obd_autopi_accu_kritiek
-    alias: "AutoPi - accu kritiek"
-    description: "Boordspanning onder de drempel; de dongle hibernateert en komt niet vanzelf terug."
-    mode: single
-    triggers:
-      - trigger: mqtt
-        topic: autopi/vehicle/battery/critical_level
-    conditions:
-      - condition: template
-        value_template: >-
-          {{ now().timestamp()
-             - as_timestamp(trigger.payload_json['@ts'] ~ '+00:00', 0) < 3600 }}
-    actions:
-      - action: persistent_notification.create
-        data:
-          notification_id: autopi_accu_kritiek
-          title: "AutoPi - accu kritiek"
-          message: >-
-            Boordspanning onder de drempel, de dongle gaat hibernateren.
-            {{ trigger.payload_json.get('reason', '') }}
 
   # Meldt pas als de mobiele verbinding vijf minuten weg blijft; korte
   # onderbrekingen (tunnel, parkeergarage) blijven stil. Komt hij terug, dan

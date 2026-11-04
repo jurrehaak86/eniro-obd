@@ -6,6 +6,8 @@ After=autopi-ingest.service
 [Service]
 Type=oneshot
 ExecStart=/usr/bin/python3 /opt/wwan-teller/wwan_teller.py --snapshot
+# Naam in /var/log/syslog en journalctl -t (anders staat er "python3[pid]")
+SyslogIdentifier=wwan-teller
 StateDirectory=wwan-teller
 NoNewPrivileges=yes
 PrivateTmp=yes

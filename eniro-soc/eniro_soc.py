@@ -15,6 +15,14 @@ De records krijgen dezelfde vorm als die van de AutoPi zelf (`@ts` + `@t`), dus
 ze landen automatisch op `autopi/obd/ev/bms` zonder dat de ontvanger iets hoeft
 te weten van dit script.
 
+De kilometerstand komt uit de instrumentencluster en die antwoordt alleen met
+het contact aan. In records zonder cluster-antwoord (laden, stilstand) gaan de
+laatst bekende kilometerstand en het laatst berekende verbruik mee uit de
+verbruiksgeschiedenis, met `odometer_bron: "opgeslagen"` (anders "cluster").
+Zo staan die sensoren in Home Assistant ook na een herstart meteen goed. Een
+opgeslagen stand wordt alleen gelezen: hij komt nooit als nieuw punt in de
+geschiedenis en telt niet mee voor de verbruiksberekening of voor ODO_DELTA.
+
 ISO-TP wordt hier zelf geïmplementeerd op een raw CAN-socket. Dat is een
 handvol regels en het scheelt de afhankelijkheid van de `can-isotp`-kernelmodule.
 
@@ -108,7 +116,7 @@ CAN_RESTART_MS = int(os.environ.get("CAN_RESTART_MS", "100"))
 
 INGEST_URL = os.environ.get("INGEST_URL", "")
 HTTP_TIMEOUT = float(os.environ.get("HTTP_TIMEOUT", "30"))
-USER_AGENT = os.environ.get("USER_AGENT", "eniro-soc/1.1")
+USER_AGENT = os.environ.get("USER_AGENT", "eniro-soc/1.2")
 
 # Pollintervallen in seconden, per voertuigstatus.
 INTERVAL_DC = int(os.environ.get("INTERVAL_DC", "60"))
@@ -622,6 +630,17 @@ def verbruik_venster(values):
     elif herberekend:
         _verbruik_schrijf(punten)
 
+    return _venster_uit(punten)
+
+
+def _venster_uit(punten):
+    """Het venster over een lijst punten, met het laatste punt als 'nu'.
+
+    Rekent alleen; leest en schrijft niets. Gedeeld door verbruik_venster()
+    (echte meting) en opgeslagen_stand() (geen cluster-antwoord).
+    """
+    if not punten:
+        return None, None
     # Het jongste punt dat ver genoeg terug ligt: venster zo dicht mogelijk
     # bij VERBRUIK_VENSTER_KM in plaats van veel ruimer.
     nu = punten[-1]
@@ -637,6 +656,39 @@ def verbruik_venster(values):
     return round(netto * 1000 / dkm, 1), round(dkm, 1)
 
 
+def opgeslagen_stand():
+    """Laatst bekende kilometerstand en verbruik uit de geschiedenis.
+
+    Voor records zonder antwoord van de cluster (laden, stilstand, contact
+    uit). Zonder dit staan kilometerstand en verbruik in Home Assistant na een
+    herstart op 'unknown' tot de volgende rit: MQTT-sensoren herstellen hun
+    state niet, en het retained bericht had die velden dan niet.
+
+    Alleen lezen. Er wordt niets geschreven: geen nieuw punt, geen
+    herberekening op schijf, de laadvlag blijft staan. De opgeslagen stand is
+    het laatste punt zelf, dus er valt ook niets toe te voegen. Ontbreekt de
+    geschiedenis of is hij onleesbaar, dan een lege dict: velden weglaten.
+    """
+    try:
+        # Oude punten zonder 'rij' alleen in het geheugen aanvullen; het
+        # wegschrijven doet verbruik_venster() bij de volgende echte meting.
+        punten, _ = _verbruik_herbereken(_verbruik_lees())
+        if not punten:
+            return {}
+        km = punten[-1]["km"]
+        if isinstance(km, bool) or not isinstance(km, (int, float)):
+            raise ValueError("kilometerstand %r is geen getal" % (km,))
+        uit = {"odometer_km": km, "odometer_bron": "opgeslagen"}
+        wh, venster = _venster_uit(punten)
+    except (KeyError, TypeError, ValueError, AttributeError) as exc:
+        log.warning("verbruiksgeschiedenis onleesbaar, geen opgeslagen stand: %s", exc)
+        return {}
+    if wh is not None:
+        uit["wh_per_km_100"] = wh
+        uit["verbruik_venster_km"] = venster
+    return uit
+
+
 def read_bms(sock):
     m1 = as_map(check_antwoord(isotp_query(sock, b"\x22\x01\x01"),
                                b"\x01\x01", MIN_LEN_0101))
@@ -649,10 +701,14 @@ def read_bms(sock):
     km = read_odometer(sock)
     if km is not None:
         out["odometer_km"] = km
+        out["odometer_bron"] = "cluster"
         wh, venster = verbruik_venster(out)
         if wh is not None:
             out["wh_per_km_100"] = wh
             out["verbruik_venster_km"] = venster
+    else:
+        # Cluster stil: laatst bekende waarden meesturen, alleen gelezen.
+        out.update(opgeslagen_stand())
     return out
 
 
@@ -802,6 +858,13 @@ def interval_for(values, metered=True):
     return INTERVAL_IDLE, UPLOAD_WAIT, "idle"
 
 
+def _gemeten_km(values):
+    """Kilometerstand als die nu van de cluster kwam, anders None."""
+    if values.get("odometer_bron") == "opgeslagen":
+        return None
+    return values.get("odometer_km")
+
+
 def worth_sending(values, last_sent, last_time):
     """Alleen versturen bij verandering, of na MAX_SILENCE. Spaart data."""
     if last_sent is None:
@@ -822,8 +885,10 @@ def worth_sending(values, last_sent, last_time):
             return True, "%s veranderd" % key
     # Afstand als aanleiding: tijdens het rijden levert dit een meetpunt per
     # ODO_DELTA kilometer, en stilstaand niets. Nodig voor de verbruikscurve,
-    # waarvoor we energie per afgelegde kilometer willen weten.
-    nu, toen = values.get("odometer_km"), last_sent.get("odometer_km")
+    # waarvoor we energie per afgelegde kilometer willen weten. Alleen een
+    # kilometerstand van de cluster telt; een opgeslagen stand is geen nieuwe
+    # meting en mag geen verzending uitlokken.
+    nu, toen = _gemeten_km(values), _gemeten_km(last_sent)
     if nu is not None and toen is not None and abs(nu - toen) >= ODO_DELTA:
         return True, "%.0f km gereden" % abs(nu - toen)
     return False, "niets veranderd"
@@ -1075,8 +1140,10 @@ class _NepSocket:
         if not self.frames:
             time.sleep(0.05)
             raise socket.timeout()
-        data, dlc = self.frames.pop(0)
-        return struct.pack(CAN_FRAME_FMT, RSP_ID, dlc, data.ljust(8, b"\x00"))
+        frame = self.frames.pop(0)
+        data, dlc = frame[0], frame[1]
+        can_id = frame[2] if len(frame) > 2 else RSP_ID
+        return struct.pack(CAN_FRAME_FMT, can_id, dlc, data.ljust(8, b"\x00"))
 
 
 def _geeft_buserror(functie, *args, **kwargs):
@@ -1135,6 +1202,183 @@ def _robuustheid_selftest():
     return checks
 
 
+def _bms_frames():
+    """De BMS-antwoorden uit de zelftest als frames voor _NepSocket."""
+    return [(bytes.fromhex(f), 8)
+            for f in (SELFTEST_0101 + " " + SELFTEST_0105).split()]
+
+
+def _odo_frames(km):
+    """Een cluster-antwoord (7CE) op 22 B0 02 met deze kilometerstand."""
+    data = b"\x62\xB0\x02" + bytes(ODO_OFFSET) + km.to_bytes(3, "big")
+    ff = bytes([0x10 | (len(data) >> 8), len(data) & 0xFF]) + data[:6]
+    uit = [(ff, 8, ODO_RSP)]
+    rest, volg = data[6:], 0x21
+    while rest:
+        uit.append((bytes([volg]) + rest[:7], 8, ODO_RSP))
+        rest, volg = rest[7:], 0x20 | ((volg + 1) & 0x0F)
+    return uit
+
+
+def _opgeslagen_selftest():
+    """v1.2: laatst bekende kilometerstand en verbruik in records zonder
+    cluster-antwoord, zonder de verbruiksgeschiedenis te raken."""
+    import shutil
+    import tempfile
+    global VERBRUIK_BESTAND, LAADVLAG_BESTAND, _laatste_odo
+    bewaard = (VERBRUIK_BESTAND, LAADVLAG_BESTAND, _laatste_odo)
+    checks = []
+
+    def bouw(d):
+        """120 km rijden met 150 Wh/km netto, zoals _verbruik_selftest."""
+        global VERBRUIK_BESTAND, LAADVLAG_BESTAND
+        VERBRUIK_BESTAND = os.path.join(d, "verbruik.jsonl")
+        LAADVLAG_BESTAND = os.path.join(d, "geladen-sinds-punt")
+        km, uit, inn = 180000, 30000.0, 30500.0
+        for stap in range(121):
+            if stap:
+                km, uit, inn = km + 1, uit + 0.17, inn + 0.02
+            verbruik_venster({"odometer_km": km,
+                              "cum_energy_used_kwh": round(uit, 3),
+                              "cum_energy_charged_kwh": round(inn, 3)})
+        return km, uit, inn
+
+    def lees(pad):
+        try:
+            with open(pad, "rb") as fh:
+                return fh.read()
+        except OSError:
+            return None
+
+    mappen = []
+    try:
+        # Twee identieke geschiedenissen: 'a' krijgt records zonder cluster
+        # ertussen, 'b' niet. Daarna moet een echte meting in beide hetzelfde
+        # opleveren.
+        a, b = (tempfile.mkdtemp(prefix="eniro-selftest-") for _ in range(2))
+        mappen += [a, b]
+        km, uit, inn = bouw(b)
+        bouw(a)
+        venster_voor = verbruik_venster({"odometer_km": km,
+                                         "cum_energy_used_kwh": round(uit, 3),
+                                         "cum_energy_charged_kwh": round(inn, 3)})
+        with open(LAADVLAG_BESTAND, "w") as fh:     # er is net geladen
+            fh.write("selftest\n")
+        voor = lees(VERBRUIK_BESTAND)
+        vlag_voor = lees(LAADVLAG_BESTAND)
+
+        _laatste_odo = None
+        rec1 = read_bms(_NepSocket(_bms_frames()))   # cluster antwoordt niet
+        rec2 = read_bms(_NepSocket(_bms_frames()))
+        checks += [
+            ("v1.2 a: zonder cluster odometer_km = laatste punt",
+             rec1.get("odometer_km") == km),
+            ("v1.2 a: odometer_bron = opgeslagen",
+             rec1.get("odometer_bron") == "opgeslagen"),
+            ("v1.2 a: verbruik uit de geschiedenis mee",
+             rec1.get("wh_per_km_100") == venster_voor[0]
+             and rec1.get("verbruik_venster_km") == venster_voor[1]
+             and 147 <= rec1["wh_per_km_100"] <= 153),
+            ("v1.2 b: verbruik.jsonl byte-gelijk na opgeslagen records",
+             voor is not None and lees(VERBRUIK_BESTAND) == voor),
+            ("v1.2 b: laadvlag ongemoeid, geen .tmp achtergebleven",
+             lees(LAADVLAG_BESTAND) == vlag_voor
+             and not os.path.exists(VERBRUIK_BESTAND + ".tmp")),
+        ]
+
+        # c: een echte meting met een hogere kilometerstand, in a (met de
+        # opgeslagen records ertussen) en in b (zonder), moet gelijk uitpakken.
+        volgende = {"odometer_km": km + 1,
+                    "cum_energy_used_kwh": round(uit + 0.17, 3),
+                    "cum_energy_charged_kwh": round(inn + 0.02, 3)}
+        uitkomst_a = verbruik_venster(dict(volgende))
+        bestand_a, vlag_a = lees(VERBRUIK_BESTAND), lees(LAADVLAG_BESTAND)
+        VERBRUIK_BESTAND = os.path.join(b, "verbruik.jsonl")
+        LAADVLAG_BESTAND = os.path.join(b, "geladen-sinds-punt")
+        with open(LAADVLAG_BESTAND, "w") as fh:
+            fh.write("selftest\n")
+        uitkomst_b = verbruik_venster(dict(volgende))
+        checks += [
+            ("v1.2 c: echte meting daarna: zelfde venster als zonder opgeslagen records",
+             uitkomst_a == uitkomst_b and uitkomst_a[0] is not None),
+            ("v1.2 c: zelfde geschiedenis, punt erbij, laadvlag opgeruimd",
+             bestand_a == lees(VERBRUIK_BESTAND)
+             and bestand_a.count(b"\n") == voor.count(b"\n") + 1
+             and vlag_a is None and lees(LAADVLAG_BESTAND) is None),
+        ]
+
+        # c: hetzelfde via read_bms met een echt cluster-antwoord
+        VERBRUIK_BESTAND = os.path.join(a, "verbruik.jsonl")
+        LAADVLAG_BESTAND = os.path.join(a, "geladen-sinds-punt")
+        regels = lees(VERBRUIK_BESTAND).count(b"\n")
+        _laatste_odo = None
+        rec3 = read_bms(_NepSocket(_bms_frames() + _odo_frames(km + 2)))
+        laatste = json.loads(lees(VERBRUIK_BESTAND).splitlines()[-1])
+        checks.append(
+            ("v1.2 c: read_bms met cluster: bron cluster, punt erbij",
+             rec3.get("odometer_km") == km + 2
+             and rec3.get("odometer_bron") == "cluster"
+             and lees(VERBRUIK_BESTAND).count(b"\n") == regels + 1
+             and laatste["km"] == km + 2))
+
+        # d: geen, lege of kapotte geschiedenis
+        d = tempfile.mkdtemp(prefix="eniro-selftest-")
+        mappen.append(d)
+        VERBRUIK_BESTAND = os.path.join(d, "verbruik.jsonl")
+        LAADVLAG_BESTAND = os.path.join(d, "geladen-sinds-punt")
+        velden = ("odometer_km", "odometer_bron", "wh_per_km_100",
+                  "verbruik_venster_km")
+        goed = True
+        for inhoud in (None, "", "geen json\n", '{"km": "x"}\n', "[1, 2]\n"):
+            if inhoud is not None:
+                with open(VERBRUIK_BESTAND, "w") as fh:
+                    fh.write(inhoud)
+            try:
+                rec = read_bms(_NepSocket(_bms_frames()))
+            except Exception as exc:  # noqa: BLE001
+                print("  onverwacht bij %r: %s: %s" % (inhoud, type(exc).__name__, exc))
+                goed = False
+                continue
+            goed = goed and not any(v in rec for v in velden) \
+                and lees(VERBRUIK_BESTAND) == (None if inhoud is None
+                                               else inhoud.encode())
+        checks.append(("v1.2 d: geen/lege/kapotte geschiedenis: velden weg, geen fout",
+                       goed))
+
+        # Kilometerstand maar nog geen 100 km: wel km, geen verbruik
+        with open(VERBRUIK_BESTAND, "w") as fh:
+            fh.write('{"km":180000,"uit":1.0,"in":1.0,"rij":0.0}\n')
+        rec = read_bms(_NepSocket(_bms_frames()))
+        checks.append(("v1.2 d: korte geschiedenis: km mee, verbruik weg",
+                       rec.get("odometer_km") == 180000
+                       and "wh_per_km_100" not in rec
+                       and "verbruik_venster_km" not in rec))
+    finally:
+        VERBRUIK_BESTAND, LAADVLAG_BESTAND, _laatste_odo = bewaard
+        for d in mappen:
+            shutil.rmtree(d, ignore_errors=True)
+
+    # e: een ongewijzigde opgeslagen stand mag geen verzending uitlokken
+    basis = dict(soc_display=80.0, soc_bms=79.5, dc_charging=False,
+                 ignition=False, main_relay=True, hv_current=0.0)
+    vorige = time.time() - 60
+    opgeslagen = dict(basis, odometer_km=180120, odometer_bron="opgeslagen")
+    gemeten = dict(basis, odometer_km=180120, odometer_bron="cluster")
+    checks += [
+        ("v1.2 e: opgeslagen km ongewijzigd: niet versturen",
+         not worth_sending(opgeslagen, opgeslagen, vorige)[0]),
+        ("v1.2 e: cluster -> opgeslagen, zelfde km: niet versturen",
+         not worth_sending(opgeslagen, gemeten, vorige)[0]),
+        ("v1.2 e: opgeslagen km telt niet als gereden",
+         not worth_sending(dict(opgeslagen, odometer_km=180100), gemeten, vorige)[0]
+         and not worth_sending(gemeten, dict(opgeslagen, odometer_km=180100),
+                               vorige)[0]),
+        ("v1.2 e: cluster +1 km: wel versturen (als voorheen)",
+         worth_sending(dict(gemeten, odometer_km=180121), gemeten, vorige)[0]),
+    ]
+    return checks
+
+
 def selftest():
     m1 = as_map(_assemble(SELFTEST_0101))
     m5 = as_map(_assemble(SELFTEST_0105))
@@ -1166,6 +1410,7 @@ def selftest():
                    and not _geeft_buserror(check_antwoord, _assemble(SELFTEST_0105),
                                            b"\x01\x05", MIN_LEN_0105)))
     checks += _robuustheid_selftest()
+    checks += _opgeslagen_selftest()
 
     verbruik = _verbruik_selftest()
     print("verbruiksvenster met laadsessie erin: %s" % json.dumps(verbruik))
@@ -1206,6 +1451,9 @@ def main():
         sock = open_can(CAN_IFACE)
         try:
             values = read_bms(sock)
+        except BusError as exc:
+            print("Geen antwoord van de BMS (%s) - auto uit?" % exc, file=sys.stderr)
+            return 3
         finally:
             sock.close()
         record = make_record(values)

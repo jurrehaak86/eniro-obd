@@ -10,6 +10,8 @@ User=autopi
 Group=autopi
 EnvironmentFile=/etc/autopi-ingest.env
 ExecStart=/opt/autopi-ingest/venv/bin/python /opt/autopi-ingest/autopi_ingest.py
+# Naam in /var/log/syslog en journalctl -t (anders staat er "python3[pid]")
+SyslogIdentifier=autopi-ingest
 Restart=always
 RestartSec=5
 

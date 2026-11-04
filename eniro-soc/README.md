@@ -32,7 +32,9 @@ van dit script hoeft te weten.
 Decodeert de frames die de auto op 02-09-2026 daadwerkelijk stuurde en
 controleert elf uitkomsten tegen onafhankelijke bronnen: dashboard-SOC,
 de 12V-meting van `obd.battery`, celspanningen, buitentemperatuur en het
-levenslange verbruik. **Doe dit vóór installatie** — dan weet je dat het
+levenslange verbruik. Daarna de regressietests: rare bus-antwoorden, einde
+laden, het verbruiksvenster met een laadsessie erin, en de opgeslagen
+kilometerstand (zie hieronder). **Doe dit vóór installatie** — dan weet je dat het
 decodeergedeelte klopt en hoef je in de auto alleen nog de CAN-kant te
 verifiëren.
 
@@ -92,6 +94,16 @@ worden, dan geldt bemeten: falen doen we zuinig.
 Bij afsluiten wordt de uitbox alsnog verstuurd, of anders naar de wachtrij
 geschreven. Zonder dat verlies je bij elke herstart tot `UPLOAD_WAIT` seconden
 aan metingen.
+
+**Kilometerstand en verbruik in elk record.** De cluster antwoordt alleen met
+het contact aan. Antwoordt hij niet (laden, stilstand), dan gaan de laatst
+bekende kilometerstand en het laatst berekende verbruik mee uit
+`verbruik.jsonl` (`opgeslagen_stand()`), met `odometer_bron: "opgeslagen"`;
+bij een verse meting is dat `"cluster"`. Zo heeft het retained bericht die
+velden altijd en staan de sensoren in Home Assistant na een herstart niet op
+`unknown`. Een opgeslagen stand wordt alleen gelezen: geen nieuw punt in de
+geschiedenis, geen invloed op het verbruik of de laadvlag, en hij telt niet
+mee voor `ODO_DELTA`. Is er nog geen geschiedenis, dan ontbreken de velden.
 
 Mislukt het versturen (geen bereik), dan gaat het record in een lokale
 wachtrij onder `/var/lib/eniro-soc/spool` en wordt het bij de volgende

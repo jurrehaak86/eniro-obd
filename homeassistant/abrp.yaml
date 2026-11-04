@@ -4,15 +4,15 @@
 # hem aanroept. Drie delen samen:
 #   1. dit bestand
 #   2. de URL-template in je eigen secrets.yaml - zie secrets.example.yaml
-#   3. eniro-mqtt.yaml (de sensoren) en eniro-autopi.yaml (de helper
-#      input_number.e_niro_bruikbare_capaciteit)
+#   3. de MQTT-sensoren (via MQTT Discovery, of eniro-mqtt.yaml) en
+#      eniro-autopi.yaml (de helper input_number.e_niro_bruikbare_capaciteit)
 # Alle gegevens komen van de dongle: SOC, vermogen, spanning, temperatuur,
 # laden, positie, snelheid, hoogte, koers en kilometerstand. Er is geen
 # fabrieksintegratie of cloudkoppeling van de auto nodig.
 #
 # LADEN - kies een van de twee:
 #   a) Als package (aanbevolen): kopieer dit bestand naar
-#      /config/packages/abrp.yaml (zie de kop van eniro-mqtt.yaml) en herstart.
+#      /config/packages/abrp.yaml (zie INSTALLATIE 7.2) en herstart.
 #   b) Zonder packages: zet het blok `rest_command:` in configuration.yaml
 #      (heb je die sleutel al, dan alleen de regels eronder), en plak de
 #      automatisering via de UI: Instellingen > Automatiseringen > nieuw >

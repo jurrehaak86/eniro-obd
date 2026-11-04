@@ -36,13 +36,21 @@ Profielen (sinds 18-10-2026, alleen zinvol op de dongle zelf):
 Het profiel komt retained binnen op PROFIEL_TOPIC (gezet door een automation in
 HA) en wordt op schijf onthouden, zodat het na een boot meteen klopt.
 
+MQTT Discovery (sinds v1.2, HA_DISCOVERY=1): de ontvanger publiceert de
+entiteiten uit discovery.json als twee device-discoveryberichten
+(<HA_DISCOVERY_PREFIX>/device/<apparaat>/config, retained). Zuinig: alleen als
+de definitie veranderd is (hash op schijf), en opnieuw als Home Assistant
+'online' meldt op <HA_DISCOVERY_PREFIX>/status (herstart van HA).
+
 Configuratie via omgevingsvariabelen, zie autopi-ingest.env.example.
 """
 
 import gzip
+import hashlib
 import json
 import logging
 import os
+import re
 import signal
 import sys
 import threading
@@ -67,12 +75,19 @@ def _stub_paho():
     class _Client:
         def __init__(self, *a, **k):
             self.gepubliceerd = []
+            self.vlaggen = []          # (topic, qos, retain)
+            self.geabonneerd = []
 
         def __getattr__(self, naam):
             return lambda *a, **k: None
 
+        def subscribe(self, topic, qos=0):
+            self.geabonneerd.append(topic)
+            return (0, 1)
+
         def publish(self, topic, payload=None, qos=0, retain=False):
             self.gepubliceerd.append((topic, payload))
+            self.vlaggen.append((topic, qos, retain))
             return _Info()
 
     client = types.ModuleType("paho.mqtt.client")
@@ -171,6 +186,32 @@ METERED_IFACES = set(
     x.strip() for x in os.environ.get("METERED_IFACES", "wwan0,ppp0").split(",")
     if x.strip())
 
+# MQTT Discovery (v1.2). Standaard UIT in de code, zodat een bestaande
+# installatie niets merkt; install.sh zet HA_DISCOVERY=1 bij een verse
+# installatie. Zie homeassistant/discovery.json en INSTALLATIE (Home Assistant).
+VERSIE = "1.2.0"
+PROJECT_URL = "https://github.com/jurrehaak86/eniro-obd"
+HA_DISCOVERY = os.environ.get("HA_DISCOVERY", "0").strip() == "1"
+HA_DISCOVERY_PREFIX = (os.environ.get("HA_DISCOVERY_PREFIX", "").strip().strip("/")
+                       or "homeassistant")
+
+
+def _standaard_discovery_bestand():
+    """Naast het script (/opt/autopi-ingest/discovery.json, zo installeert
+    install.sh hem); anders de plek in de repository."""
+    hier = os.path.dirname(os.path.abspath(__file__))
+    for pad in (os.path.join(hier, "discovery.json"),
+                os.path.join(hier, "..", "homeassistant", "discovery.json")):
+        if os.path.exists(pad):
+            return os.path.normpath(pad)
+    return os.path.join(hier, "discovery.json")
+
+
+DISCOVERY_FILE = (os.environ.get("DISCOVERY_FILE", "").strip()
+                  or _standaard_discovery_bestand())
+DISCOVERY_HASH_BESTAND = os.environ.get(
+    "DISCOVERY_HASH_BESTAND", "/var/lib/autopi-ingest/discovery.sha256")
+
 # ------------------------------------------------------------------ mqtt-client
 
 
@@ -202,7 +243,13 @@ class Publisher:
             client.publish(STATUS_TOPIC, "online", qos=1, retain=True)
             if PROFIEL_TOPIC:
                 client.subscribe(PROFIEL_TOPIC, qos=1)
+            if HA_DISCOVERY:
+                client.subscribe(birth_topic(), qos=1)
             self.connected.set()
+            if HA_DISCOVERY:
+                # Niet in deze callback publiceren en wachten: dat blokkeert
+                # de netwerklus van paho, die de bevestiging moet ontvangen.
+                achtergrond(discovery.sync, "verbonden")
         else:
             log.error("MQTT-verbinding geweigerd: %s", reason_code)
             self.connected.clear()
@@ -210,6 +257,13 @@ class Publisher:
     def _on_message(self, client, userdata, msg):
         if PROFIEL_TOPIC and msg.topic == PROFIEL_TOPIC:
             profiel.zet(msg.payload.decode("utf-8", "replace"))
+        elif HA_DISCOVERY and msg.topic == birth_topic():
+            # Alleen een live 'online' (HA is net gestart). Een retained
+            # 'online' krijgen we bij elke verbinding opnieuw; daarop
+            # publiceren zou elke wekbeurt kilobytes 4G kosten.
+            tekst = msg.payload.decode("utf-8", "replace").strip()
+            if tekst == "online" and not getattr(msg, "retain", False):
+                achtergrond(discovery.sync, "Home Assistant online", True)
 
     def _on_disconnect(self, client, userdata, *args):
         log.warning("MQTT-verbinding verbroken, paho probeert opnieuw")
@@ -227,16 +281,17 @@ class Publisher:
             self.client.loop_stop()
             self.client.disconnect()
 
-    def publish(self, topic, payload, retain=True):
+    def publish(self, topic, payload, retain=True, qos=None):
         """Publiceert en wacht op bevestiging. Geeft True/False terug."""
+        qos = MQTT_QOS if qos is None else qos
         if not self.connected.wait(timeout=PUBLISH_TIMEOUT):
             log.error("Geen MQTT-verbinding, publicatie naar %s overgeslagen", topic)
             return False
-        info = self.client.publish(topic, payload, qos=MQTT_QOS, retain=retain)
+        info = self.client.publish(topic, payload, qos=qos, retain=retain)
         if info.rc != mqtt.MQTT_ERR_SUCCESS:
             log.error("Publicatie naar %s mislukt: rc=%s", topic, info.rc)
             return False
-        if MQTT_QOS > 0:
+        if qos > 0:
             try:
                 try:
                     info.wait_for_publish(timeout=PUBLISH_TIMEOUT)
@@ -257,6 +312,133 @@ class Publisher:
 
 
 publisher = Publisher()
+
+
+def achtergrond(fn, *args):
+    threading.Thread(target=fn, args=args, daemon=True).start()
+
+# --------------------------------------------------------------- mqtt discovery
+
+STANDAARD_PREFIX = "autopi/"
+STANDAARD_STATUS = "autopi/dongle/status"
+PLATFORMS = ("sensor", "binary_sensor", "device_tracker")
+# Alleen de afkortingen die de HA-documentatie voor device discovery noemt;
+# de opties van de entiteiten gaan voluit (HA leest beide).
+DEV_AFKORTING = {"identifiers": "ids", "manufacturer": "mf", "model": "mdl",
+                 "sw_version": "sw", "name": "name"}
+
+
+def birth_topic():
+    return "%s/status" % HA_DISCOVERY_PREFIX
+
+
+def discovery_topic(apparaat):
+    return "%s/device/%s/config" % (HA_DISCOVERY_PREFIX, apparaat)
+
+
+def eigen_topic(topic):
+    """discovery.json noemt het standaardprefix; dit is wat wij publiceren."""
+    if topic == STANDAARD_STATUS:
+        return STATUS_TOPIC
+    if topic.startswith(STANDAARD_PREFIX):
+        return "%s/%s" % (MQTT_PREFIX, topic[len(STANDAARD_PREFIX):])
+    return topic
+
+
+def laad_discovery(pad=None):
+    with open(pad or DISCOVERY_FILE, encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def discovery_berichten(defs):
+    """discovery.json -> [(topic, payload)], één device-discoverybericht per
+    apparaat. Velden die met _ beginnen (uitleg) gaan niet mee."""
+    uit = []
+    for apparaat, d in defs["devices"].items():
+        if not re.match(r"^[A-Za-z0-9_-]+$", apparaat):
+            raise ValueError("apparaat-id %r: alleen letters, cijfers, _ en -" % apparaat)
+        dev = dict((DEV_AFKORTING.get(k, k), v) for k, v in d["device"].items()
+                   if not k.startswith("_"))
+        dev["sw"] = VERSIE
+        cmps = {}
+        for cid, c in d["components"].items():
+            comp = {}
+            for k, v in c.items():
+                if k.startswith("_"):
+                    continue
+                if k == "platform":
+                    k = "p"
+                elif k.endswith("_topic"):
+                    v = eigen_topic(v)
+                comp[k] = v
+            if comp.get("p") not in PLATFORMS:
+                raise ValueError("%s: platform moet een van %s zijn" % (cid, ", ".join(PLATFORMS)))
+            # Alleen "platform" = verwijderen: HA haalt de entiteit dan weg.
+            if len(comp) > 1 and not comp.get("unique_id"):
+                raise ValueError("%s: unique_id is verplicht" % cid)
+            cmps[cid] = comp
+        bericht = {"dev": dev,
+                   "o": {"name": "eniro-obd", "sw": VERSIE, "url": PROJECT_URL},
+                   "cmps": cmps}
+        uit.append((discovery_topic(apparaat),
+                    json.dumps(bericht, separators=(",", ":"), ensure_ascii=False)))
+    return uit
+
+
+def berichten_hash(berichten):
+    h = hashlib.sha256()
+    for topic, payload in berichten:
+        h.update(topic.encode("utf-8") + b"\0" + payload.encode("utf-8") + b"\0")
+    return h.hexdigest()
+
+
+class Discovery:
+    """Publiceert discovery.json, maar alleen als het nodig is."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+
+    def _gelezen_hash(self):
+        try:
+            with open(DISCOVERY_HASH_BESTAND) as fh:
+                return fh.read().strip()
+        except OSError:
+            return None
+
+    def _bewaar_hash(self, waarde):
+        try:
+            os.makedirs(os.path.dirname(DISCOVERY_HASH_BESTAND), exist_ok=True)
+            with open(DISCOVERY_HASH_BESTAND, "w") as fh:
+                fh.write(waarde + "\n")
+        except OSError as exc:
+            log.warning("Discovery-hash onthouden mislukt: %s", exc)
+
+    def sync(self, reden, forceer=False):
+        """Geeft het aantal gepubliceerde berichten terug (0 = niets nodig of
+        uit), of None bij een fout."""
+        if not HA_DISCOVERY:
+            return 0
+        with self.lock:
+            try:
+                berichten = discovery_berichten(laad_discovery())
+            except (OSError, ValueError, KeyError, AttributeError) as exc:
+                log.error("Discovery: %s niet bruikbaar: %s", DISCOVERY_FILE, exc)
+                return None
+            nieuw = berichten_hash(berichten)
+            if not forceer and nieuw == self._gelezen_hash():
+                log.debug("Discovery ongewijzigd (%s), niets verstuurd", reden)
+                return 0
+            for topic, payload in berichten:
+                if not publisher.publish(topic, payload, retain=True, qos=1):
+                    log.warning("Discovery naar %s mislukt; volgende verbinding opnieuw", topic)
+                    return None
+            self._bewaar_hash(nieuw)
+            log.info("Discovery gepubliceerd (%s): %d bericht(en), %d bytes", reden,
+                     len(berichten), sum(len(p.encode("utf-8")) for _, p in berichten))
+            return len(berichten)
+
+
+discovery = Discovery()
 
 # -------------------------------------------------------------------- verwerken
 
@@ -630,13 +812,156 @@ def selftest():
     checks.append(("laaddefinitie: regeneratie is geen laden",
                    not laadt({"hv_current": -20.0, "ignition": True})))
 
+    del gepubliceerd[:]
+    checks.extend(selftest_discovery())
+
     ok = True
     for label, geslaagd in checks:
+        if geslaagd is None:
+            print("  SKIP %s" % label)
+            continue
         print("  %s %s" % ("PASS" if geslaagd else "FAIL", label))
         ok = ok and geslaagd
     print()
     print("ZELFTEST %s" % ("GESLAAGD" if ok else "MISLUKT"))
     return 0 if ok else 1
+
+
+def selftest_discovery():
+    """MQTT Discovery: berichten opbouwen uit discovery.json, en publiceren
+    alleen als het nodig is. Met de nep-broker en een tijdelijke hash."""
+    import tempfile
+    import types
+    import zlib
+    global HA_DISCOVERY, DISCOVERY_FILE, DISCOVERY_HASH_BESTAND, achtergrond
+    global MQTT_PREFIX, STATUS_TOPIC, MQTT_HOST, MQTT_USER, MQTT_PASS, INGEST_PATH
+    checks = []
+    if not os.path.exists(DISCOVERY_FILE):
+        return [("discovery: %s niet gevonden (HA_DISCOVERY=0-installatie)"
+                 % DISCOVERY_FILE, None)]
+    gepubliceerd = publisher.client.gepubliceerd
+    bewaard = (HA_DISCOVERY, DISCOVERY_FILE, DISCOVERY_HASH_BESTAND, achtergrond,
+               MQTT_PREFIX, STATUS_TOPIC, MQTT_HOST, MQTT_USER, MQTT_PASS, INGEST_PATH)
+    tmp = tempfile.mkdtemp(prefix="autopi-ingest-selftest-")
+    try:
+        achtergrond = lambda fn, *a: fn(*a)          # noqa: E731 - synchroon
+        DISCOVERY_HASH_BESTAND = os.path.join(tmp, "discovery.sha256")
+        # Geheimen die nooit in een bericht mogen komen.
+        MQTT_HOST, MQTT_USER = "192.0.2.77", "selftest-gebruiker"
+        MQTT_PASS, INGEST_PATH = "selftest-wachtwoord-xyz", "/ingest/selftest-pad-xyz"
+        MQTT_PREFIX, STATUS_TOPIC = "autopi", "autopi/dongle/status"
+        defs = laad_discovery()
+
+        def disc():
+            uit = [t for t, _ in gepubliceerd if t.startswith(HA_DISCOVERY_PREFIX + "/device/")]
+            del gepubliceerd[:]
+            return uit
+
+        # 1. Het bericht zelf
+        berichten = discovery_berichten(defs)
+        checks.append(("discovery: één bericht per apparaat, onder <prefix>/device/<id>/config",
+                       [t for t, _ in berichten] == [discovery_topic(a) for a in defs["devices"]]
+                       and all(re.match(r"^homeassistant/device/[A-Za-z0-9_-]+/config$", t)
+                               for t, _ in berichten)))
+        geladen = [json.loads(p) for _, p in berichten]
+        checks.append(("discovery: geldige JSON met dev, o en cmps",
+                       all(set(b) == {"dev", "o", "cmps"} for b in geladen)))
+        checks.append(("discovery: dev.sw en o.sw = versie %s, o.url gezet" % VERSIE,
+                       all(b["dev"].get("sw") == VERSIE and b["o"].get("sw") == VERSIE
+                           and b["o"].get("name") and b["o"].get("url", "").startswith("https://")
+                           for b in geladen)))
+        checks.append(("discovery: dev heeft ids en name",
+                       all(b["dev"].get("ids") and b["dev"].get("name") for b in geladen)))
+        comps = [(cid, c) for b in geladen for cid, c in b["cmps"].items()]
+        uids = [c.get("unique_id") for _, c in comps]
+        checks.append(("discovery: elke entiteit heeft p en unique_id (%d stuks)" % len(comps),
+                       all(c.get("p") in PLATFORMS and c.get("unique_id") for _, c in comps)))
+        checks.append(("discovery: unique_id's uniek en gelijk aan de component-id",
+                       len(set(uids)) == len(uids) and all(cid == c["unique_id"] for cid, c in comps)))
+        checks.append(("discovery: default_entity_id past bij het platform",
+                       all(c.get("default_entity_id", c["p"] + ".").startswith(c["p"] + ".")
+                           for _, c in comps)))
+        checks.append(("discovery: geen uitlegvelden (_comment) in het bericht",
+                       not any(k.startswith("_") for _, c in comps for k in c)))
+        # Topics moeten bestaan in wat de ontvanger publiceert voor de
+        # records van eniro-soc, de firmware en diag, plus de last-will.
+        bekend = set("%s/%s" % (MQTT_PREFIX, topic_for(r)) for r in (
+            {"@t": "obd.ev.bms"},        # eniro-soc
+            {"@t": "obd.bat"},           # firmware: 12V
+            {"@t": "track.pos"},         # firmware: GPS
+            {"@t": "device.diag"}))      # diag/
+        bekend.add(STATUS_TOPIC)
+        gebruikt = set(v for _, c in comps for k, v in c.items() if k.endswith("_topic"))
+        checks.append(("discovery: alle topics komen voor in wat er gepubliceerd wordt",
+                       gebruikt <= bekend and len(gebruikt) == 5))
+        alles = "".join(p for _, p in berichten)
+        checks.append(("discovery: geen host, gebruiker, wachtwoord of ingest-pad in het bericht",
+                       not any(g in alles for g in (MQTT_HOST, MQTT_USER, MQTT_PASS, INGEST_PATH))))
+        MQTT_PREFIX, STATUS_TOPIC = "auto2", "elders/status"
+        anders = "".join(p for _, p in discovery_berichten(defs))
+        checks.append(("discovery: MQTT_PREFIX en STATUS_TOPIC worden overgenomen",
+                       '"auto2/obd/ev/bms"' in anders and '"elders/status"' in anders
+                       and '"autopi/' not in anders))
+        MQTT_PREFIX, STATUS_TOPIC = "autopi", "autopi/dongle/status"
+        groottes = [len(p.encode("utf-8")) for _, p in berichten]
+        gz = sum(len(zlib.compress(p.encode("utf-8"), 9)) for _, p in berichten)
+        print("  INFO discovery: %d berichten, %s bytes (samen %d; gecomprimeerd ~%d)"
+              % (len(groottes), "+".join(str(g) for g in groottes), sum(groottes), gz))
+
+        # 2. Zuinig publiceren
+        HA_DISCOVERY = False
+        del gepubliceerd[:]
+        r = discovery.sync("uit")
+        checks.append(("discovery: HA_DISCOVERY=0 publiceert niets", r == 0 and disc() == []))
+        publisher.client.geabonneerd = []
+        publisher._on_connect(publisher.client, None, {}, 0)
+        checks.append(("discovery: HA_DISCOVERY=0 abonneert niet op de birth",
+                       birth_topic() not in publisher.client.geabonneerd and disc() == []))
+        HA_DISCOVERY = True
+        publisher.client.vlaggen = []
+        publisher._on_connect(publisher.client, None, {}, 0)
+        vlag = [(q, r) for t, q, r in publisher.client.vlaggen if t.startswith(HA_DISCOVERY_PREFIX)]
+        checks.append(("discovery: eerste verbinding publiceert beide berichten, retained, QoS 1",
+                       disc() == [t for t, _ in berichten] and vlag == [(1, True)] * len(berichten)
+                       and os.path.exists(DISCOVERY_HASH_BESTAND)))
+        checks.append(("discovery: abonneert op %s" % birth_topic(),
+                       birth_topic() in publisher.client.geabonneerd))
+        publisher._on_connect(publisher.client, None, {}, 0)
+        checks.append(("discovery: tweede verbinding publiceert niets", disc() == []))
+        bericht = lambda tekst, retain=False: types.SimpleNamespace(   # noqa: E731
+            topic=birth_topic(), payload=tekst.encode(), retain=retain)
+        publisher._on_message(publisher.client, None, bericht("online"))
+        checks.append(("discovery: HA meldt 'online' -> opnieuw gepubliceerd",
+                       disc() == [t for t, _ in berichten]))
+        publisher._on_message(publisher.client, None, bericht("online", retain=True))
+        publisher._on_message(publisher.client, None, bericht("offline"))
+        checks.append(("discovery: retained 'online' of 'offline' -> niets", disc() == []))
+        gewijzigd = json.loads(json.dumps(defs))
+        eerste = next(iter(gewijzigd["devices"].values()))
+        next(iter(eerste["components"].values()))["unit_of_measurement"] = "x"
+        DISCOVERY_FILE = os.path.join(tmp, "discovery.json")
+        with open(DISCOVERY_FILE, "w", encoding="utf-8") as fh:
+            json.dump(gewijzigd, fh)
+        publisher._on_connect(publisher.client, None, {}, 0)
+        checks.append(("discovery: gewijzigde definitie -> opnieuw gepubliceerd",
+                       len(disc()) == len(berichten)))
+        publisher._on_connect(publisher.client, None, {}, 0)
+        checks.append(("discovery: daarna weer niets", disc() == []))
+        with open(DISCOVERY_FILE, "w", encoding="utf-8") as fh:
+            fh.write("{kapot")
+        niveau = log.level
+        log.setLevel(logging.CRITICAL)             # de verwachte foutmelding niet tonen
+        r = discovery.sync("kapot")
+        log.setLevel(niveau)
+        checks.append(("discovery: kapotte discovery.json -> fout, niets gepubliceerd",
+                       r is None and disc() == []))
+    finally:
+        (HA_DISCOVERY, DISCOVERY_FILE, DISCOVERY_HASH_BESTAND, achtergrond,
+         MQTT_PREFIX, STATUS_TOPIC, MQTT_HOST, MQTT_USER, MQTT_PASS, INGEST_PATH) = bewaard
+        for naam in os.listdir(tmp):
+            os.remove(os.path.join(tmp, naam))
+        os.rmdir(tmp)
+    return checks
 
 
 def main():

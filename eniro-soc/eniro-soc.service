@@ -7,6 +7,8 @@ After=network.target
 Type=simple
 EnvironmentFile=/etc/eniro-soc.env
 ExecStart=/usr/bin/python3 /opt/eniro-soc/eniro_soc.py
+# Naam in /var/log/syslog en journalctl -t (anders staat er "python3[pid]")
+SyslogIdentifier=eniro-soc
 Restart=always
 RestartSec=10
 

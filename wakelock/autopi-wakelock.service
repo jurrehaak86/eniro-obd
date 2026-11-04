@@ -6,6 +6,8 @@ After=salt-minion.service
 [Service]
 Type=oneshot
 ExecStart=/usr/bin/python3 /opt/autopi-wakelock/autopi_wakelock.py
+# Naam in /var/log/syslog en journalctl -t (anders staat er "python3[pid]")
+SyslogIdentifier=autopi-wakelock
 
 NoNewPrivileges=yes
 PrivateTmp=yes

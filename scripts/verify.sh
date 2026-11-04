@@ -48,10 +48,14 @@ fi
 if [ -r "$SCRIPT" ]; then
     echo
     echo "-- een meting uit de auto (--once --dry-run) --"
-    if python3 "$SCRIPT" --once --dry-run 2>&1 | sed 's/^/   /'
-    then goed "meting uit de auto" "de BMS antwoordde"
-    else mis "meting uit de auto" "geen antwoord - staat de auto in ready of aan de lader?"
-    fi
+    # Uitvoer en exitcode apart: in een pijp naar sed telt de exitcode van sed.
+    meting=$(python3 "$SCRIPT" --once --dry-run 2>&1); rc=$?
+    printf '%s\n' "$meting" | sed 's/^/   /'
+    case $rc in
+        0) goed "meting uit de auto" "de BMS antwoordde" ;;
+        3) zeg "meting uit de auto" "--      geen antwoord: auto uit? Zet hem in ready of aan de lader en draai opnieuw" ;;
+        *) mis "meting uit de auto" "eniro_soc.py --once faalde (exitcode $rc)" ;;
+    esac
 fi
 
 # 5. Services

@@ -10,6 +10,8 @@ Group=autopi-ingest
 EnvironmentFile=/etc/autopi-ingest.env
 # Systeem-Python met python3-paho-mqtt uit apt (1.4.0 op buster); geen venv.
 ExecStart=/usr/bin/python3 /opt/autopi-ingest/autopi_ingest.py
+# Naam in /var/log/syslog en journalctl -t (anders staat er "python3[pid]")
+SyslogIdentifier=autopi-ingest
 Restart=always
 RestartSec=5
 

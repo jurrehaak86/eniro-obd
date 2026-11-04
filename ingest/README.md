@@ -201,6 +201,8 @@ Topics:
 | `autopi/dongle/status` | `online`/`offline` van de ontvanger op de dongle (last-will) |
 | `autopi/status` | idem voor de servervariant |
 | `autopi/config/profiel` | door HA gezet: `dagelijks` of `reis` (retained) |
+| `homeassistant/device/<apparaat>/config` | MQTT Discovery, alleen met `HA_DISCOVERY=1` (retained) |
+| `homeassistant/status` | gelezen: `online` van HA na een herstart, alleen met `HA_DISCOVERY=1` |
 
 ## Home Assistant
 
@@ -233,6 +235,41 @@ last-will op `autopi/dongle/status` gaat bij elke slaap op `offline`; als
 availability zou dat alle sensoren onbeschikbaar maken zodra de auto
 stilstaat. De waarden zijn retained, en `@ts` in elk record geeft de leeftijd.
 Gebruik "dongle online" als gezondheidssignaal.
+
+## MQTT Discovery (v1.2)
+
+Met `HA_DISCOVERY=1` maakt de ontvanger de Home Assistant-entiteiten zelf aan.
+Hij leest `discovery.json` (standaard naast het script,
+`/opt/autopi-ingest/discovery.json`; in de repository
+`../homeassistant/discovery.json`) en publiceert per apparaat één
+device-discoverybericht op `<HA_DISCOVERY_PREFIX>/device/<apparaat>/config`,
+retained en met QoS 1: `dev` (met `sw` = versie van eniro-obd), `o` (herkomst:
+naam, versie, URL van het project) en `cmps` (de entiteiten, met `p` en
+`unique_id`). Velden die met `_` beginnen zijn uitleg en gaan niet mee. Het
+standaardprefix `autopi/` in de topics wordt vervangen door `MQTT_PREFIX`, en
+`autopi/dongle/status` door `STATUS_TOPIC`.
+
+| Variabele | Standaard | Wat |
+|---|---|---|
+| `HA_DISCOVERY` | `0` (code), `1` (verse installatie) | aan/uit |
+| `HA_DISCOVERY_PREFIX` | `homeassistant` | het discovery-prefix van de MQTT-integratie |
+| `DISCOVERY_FILE` | naast het script | pad naar `discovery.json` |
+| `DISCOVERY_HASH_BESTAND` | `/var/lib/autopi-ingest/discovery.sha256` | hash van het laatst verstuurde bericht |
+
+Zuinig op 4G:
+
+- Bij elke verbinding wordt alleen de hash vergeleken; gelijk = niets
+  versturen. Pas als `discovery.json` (of de versie, het prefix of
+  `STATUS_TOPIC`) verandert, gaan de twee berichten weg (~9 KB samen).
+- Op `<prefix>/status` alleen een **live** `online` (HA is net gestart): dan
+  opnieuw publiceren, zoals Home Assistant aanbeveelt. Een retained `online`
+  wordt genegeerd, anders zou elke wekbeurt de berichten opnieuw sturen.
+- Publiceren gebeurt in een eigen thread: in de `on_connect`-callback wachten
+  op de bevestiging zou de netwerklus van paho blokkeren.
+
+Controleren: `sudo journalctl -u autopi-ingest | grep Discovery` toont bijv.
+`Discovery gepubliceerd (verbonden): 2 bericht(en), 9211 bytes`. Een
+definitie aanpassen of de overstap vanaf `eniro-mqtt.yaml`: INSTALLATIE 7.2.
 
 ## Profielen: dagelijks en reis — 18-10-2026
 
