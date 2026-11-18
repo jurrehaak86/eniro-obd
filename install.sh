@@ -22,7 +22,7 @@ umask 077
 # Python 2 (salt) schrijft anders geen niet-ASCII naar een pipe; geen .pyc in de kloon.
 export PYTHONIOENCODING=utf-8 PYTHONDONTWRITEBYTECODE=1
 
-VERSIE=1.3.0
+VERSIE=1.3.1
 REPO=$(cd "$(dirname "$0")" && pwd)
 HELPER="$REPO/scripts/install_helper.py"
 ROOT=${ROOT:-}

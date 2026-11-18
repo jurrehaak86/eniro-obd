@@ -1711,7 +1711,9 @@ def main():
         sock = open_can(CAN_IFACE)
         try:
             values = read_bms(sock)
-        except BusError as exc:
+        except (BusError, OSError) as exc:
+            # OSError: met de auto in slaap loopt de CAN-zendbuffer vol
+            # (ENOBUFS, er bevestigt niemand). Hetzelfde als geen antwoord.
             print("Geen antwoord van de BMS (%s) - auto uit?" % exc, file=sys.stderr)
             return 3
         finally:

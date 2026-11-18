@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.3.1 — 2026-11-18
+
+### Opgelost
+
+- `eniro_soc.py --once` (en dus `verify.sh`) gaf een traceback als de auto
+  sliep en can0 al omhoog stond: `OSError: [Errno 105] No buffer space
+  available`. Nu dezelfde melding als bij een stille bus ("auto uit?", exit 3).
+
 ## v1.3.0 — 2026-11-18
 
 ### Nieuw
