@@ -97,10 +97,9 @@ input_select:
 automation:
   # Zet de keuze retained op MQTT. De ontvanger op de dongle leest hem bij
   # elke (her)verbinding en onthoudt hem op schijf. Ook bij het starten van
-  # Home Assistant, zodat het retained bericht er altijd is.
-  # Let op: alleen een wissel of een herstart publiceert. Na het laden van
-  # dit bestand via "herladen" (in plaats van een herstart): wissel het
-  # profiel een keer heen en terug.
+  # Home Assistant en bij het herladen van de automatiseringen, zodat het
+  # retained bericht er altijd is (tot v1.2 moest je na "herladen" het
+  # profiel een keer heen en terug wisselen).
   # Vereist op de dongle: PROFIEL_TOPIC=autopi/config/profiel in de env van
   # de ontvanger, en leesrecht op dat topic voor zijn MQTT-gebruiker.
   - id: eniro_obd_autopi_profiel_naar_dongle
@@ -112,6 +111,8 @@ automation:
         entity_id: input_select.autopi_profiel
       - trigger: homeassistant
         event: start
+      - trigger: event
+        event_type: automation_reloaded
     actions:
       - action: mqtt.publish
         data:

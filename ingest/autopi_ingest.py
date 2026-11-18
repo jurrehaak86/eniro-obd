@@ -189,7 +189,7 @@ METERED_IFACES = set(
 # MQTT Discovery (v1.2). Standaard UIT in de code, zodat een bestaande
 # installatie niets merkt; install.sh zet HA_DISCOVERY=1 bij een verse
 # installatie. Zie homeassistant/discovery.json en INSTALLATIE (Home Assistant).
-VERSIE = "1.2.1"
+VERSIE = "1.3.0"
 PROJECT_URL = "https://github.com/jurrehaak86/eniro-obd"
 HA_DISCOVERY = os.environ.get("HA_DISCOVERY", "0").strip() == "1"
 HA_DISCOVERY_PREFIX = (os.environ.get("HA_DISCOVERY_PREFIX", "").strip().strip("/")
@@ -591,6 +591,10 @@ class Bundel:
                     or time.monotonic() - self.sinds >= BUNDEL_INTERVAL)
 
     def verstuur(self, reden):
+        with publiceer_lock:
+            return self._verstuur(reden)
+
+    def _verstuur(self, reden):
         with self.lock:
             items = list(self.laatste.items())
         if not items:
@@ -614,6 +618,14 @@ class Bundel:
 
 
 bundel = Bundel()
+
+# Eén publicatie tegelijk naar de BMS- en bundeltopics (v1.3). Tot v1.2 nam
+# Bundel.verstuur() een momentopname onder zijn eigen lock en publiceerde
+# daarbuiten. Kwam intussen een upload binnen die hetzelfde topic live
+# publiceerde, dan ging de oudere bundelwaarde daarna alsnog weg en sprong
+# bijvoorbeeld de SoC in Home Assistant terug. RLock: verstuur() wordt ook
+# vanuit handle_payload() aangeroepen terwijl die de lock al heeft.
+publiceer_lock = threading.RLock()
 
 
 def laadt(record):
@@ -672,6 +684,12 @@ def handle_payload(body, content_encoding):
     if not isinstance(data, list):
         raise ValueError("verwachtte een JSON-array of -object, kreeg %s" % type(data))
 
+    with publiceer_lock:
+        return _verwerk(data)
+
+
+def _verwerk(data):
+    """Publiceert of bundelt de records; onder publiceer_lock."""
     global laatste_bms_laadt
     ok = True
     gebundeld = bundelen()
@@ -692,9 +710,14 @@ def handle_payload(body, content_encoding):
         # Wat nog voor dit topic in de bundel wacht is ouder: weg ermee.
         bundel.vergeet(topic)
         gelukt = publisher.publish(topic, payload)
-        if gelukt and is_bms(record):
+        if not gelukt:
+            # Stoppen bij de eerste mislukte publicatie (v1.3). De dongle krijgt
+            # 503 en biedt de hele upload opnieuw aan; doorgaan kostte per
+            # record PUBLISH_TIMEOUT onder publiceer_lock en hield zo alle
+            # andere uploads minutenlang vast.
+            return len(data), False
+        if is_bms(record):
             laatste_bms_laadt = laadt(record)
-        ok = gelukt and ok
         ok = publisher.publish(f"{MQTT_PREFIX}/_last", payload) and ok
         log.debug("→ %s %s", topic, payload)
     return len(data), ok
@@ -709,11 +732,17 @@ class Handler(BaseHTTPRequestHandler):
 
     def _reply(self, code, obj):
         payload = json.dumps(obj).encode("utf-8")
-        self.send_response(code)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(payload)))
-        self.end_headers()
-        self.wfile.write(payload)
+        try:
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+        except (BrokenPipeError, ConnectionResetError):
+            # De client gaf het al op (HTTP_TIMEOUT van eniro-soc verstreken
+            # terwijl MQTT niet bevestigde). Hij biedt het later opnieuw aan;
+            # een traceback in de log voegt niets toe. Gezien 15-11-2026.
+            log.info("Client was al weg voor het antwoord (%s)", code)
 
     def do_GET(self):
         # Alleen een health-endpoint; alles anders bestaat niet.
@@ -812,6 +841,7 @@ def selftest():
     checks.append(("laaddefinitie: regeneratie is geen laden",
                    not laadt({"hv_current": -20.0, "ignition": True})))
 
+    checks.extend(selftest_race())
     del gepubliceerd[:]
     checks.extend(selftest_discovery())
 
@@ -825,6 +855,51 @@ def selftest():
     print()
     print("ZELFTEST %s" % ("GESLAAGD" if ok else "MISLUKT"))
     return 0 if ok else 1
+
+
+def selftest_race():
+    """v1.3: een bundel die al publiceert en een upload met een nieuwer record
+    voor hetzelfde topic. Het nieuwere moet als laatste op het topic staan."""
+    gepubliceerd = publisher.client.gepubliceerd
+    topic = f"{MQTT_PREFIX}/obd/ev/bms"
+    del gepubliceerd[:]
+    oud = json.dumps({"@t": "obd.ev.bms", "@ts": "11:00", "hv_current": 0.0,
+                      "ignition": False, "soc_display": 60}, separators=(",", ":"))
+    bundel.voeg_toe(topic, oud)
+    in_bundel = threading.Event()
+    door = threading.Event()
+    live_poging = threading.Event()
+    echt = publisher.publish
+
+    def trage_publish(t, payload, retain=True, qos=None):
+        if t == topic and payload == oud:
+            in_bundel.set()
+            door.wait(2)
+        elif t == topic:
+            live_poging.set()
+        return echt(t, payload, retain=retain, qos=qos)
+
+    publisher.publish = trage_publish
+    try:
+        bundel_draad = threading.Thread(target=bundel.verstuur, args=("interval",))
+        bundel_draad.start()
+        in_bundel.wait(2)
+        nieuw = {"@t": "obd.ev.bms", "@ts": "11:05", "hv_current": -7.0,
+                 "ignition": False, "dc_charging": False, "soc_display": 61}
+        upload = threading.Thread(target=handle_payload,
+                                  args=(json.dumps([nieuw]).encode(), None))
+        upload.start()
+        # Zonder lock publiceert de upload nu al; met lock wacht hij op de bundel.
+        live_poging.wait(1.0)
+        door.set()
+        bundel_draad.join(3)
+        upload.join(3)
+    finally:
+        publisher.publish = echt
+    volgorde = [json.loads(p)["@ts"] for t, p in gepubliceerd if t == topic]
+    del gepubliceerd[:]
+    return [("v1.3: bundel en live-upload tegelijk: nieuwste staat als laatste",
+             volgorde[-1:] == ["11:05"])]
 
 
 def selftest_discovery():
@@ -889,11 +964,12 @@ def selftest_discovery():
             {"@t": "obd.ev.bms"},        # eniro-soc
             {"@t": "obd.bat"},           # firmware: 12V
             {"@t": "track.pos"},         # firmware: GPS
-            {"@t": "device.diag"}))      # diag/
+            {"@t": "device.diag"},       # diag/
+            {"@t": "device.wifi"}))      # diag/ (v1.3)
         bekend.add(STATUS_TOPIC)
         gebruikt = set(v for _, c in comps for k, v in c.items() if k.endswith("_topic"))
         checks.append(("discovery: alle topics komen voor in wat er gepubliceerd wordt",
-                       gebruikt <= bekend and len(gebruikt) == 5))
+                       gebruikt <= bekend and len(gebruikt) == 6))
         alles = "".join(p for _, p in berichten)
         checks.append(("discovery: geen host, gebruiker, wachtwoord of ingest-pad in het bericht",
                        not any(g in alles for g in (MQTT_HOST, MQTT_USER, MQTT_PASS, INGEST_PATH))))

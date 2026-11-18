@@ -44,6 +44,15 @@ if [ -r "$SCRIPT" ]; then
     fi
 fi
 
+# 3b. Wifi-uitlezing van diag zonder netwerk (v1.3)
+DIAG=/opt/autopi-diag/autopi_diag.py
+if [ -r "$DIAG" ] && grep -q -- "--selftest" "$DIAG"; then
+    if python3 "$DIAG" --selftest >/tmp/autopi-diag-selftest.$$ 2>&1
+    then goed "selftest diag" "wifi-uitlezing klopt"
+    else mis "selftest diag" "zie /tmp/autopi-diag-selftest.$$"
+    fi
+fi
+
 # 4. Een echte meting, niets versturen
 if [ -r "$SCRIPT" ]; then
     echo

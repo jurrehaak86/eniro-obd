@@ -1,5 +1,5 @@
 [Unit]
-Description=autopi-diag - stuurt 4G- en routediagnostiek naar de ingest
+Description=autopi-diag - stuurt 4G-, wifi- en routediagnostiek naar de ingest
 Documentation=file:///opt/autopi-diag/README.md
 After=network.target
 
@@ -7,7 +7,7 @@ After=network.target
 Type=oneshot
 # Hergebruikt de env van eniro-soc, zodat het geheime ingest-pad op één plek staat.
 EnvironmentFile=/etc/eniro-soc.env
-Environment=USER_AGENT=autopi-diag/1.0
+Environment=USER_AGENT=autopi-diag/1.1
 ExecStart=/usr/bin/python3 /opt/autopi-diag/autopi_diag.py
 # Naam in /var/log/syslog en journalctl -t (anders staat er "python3[pid]")
 SyslogIdentifier=autopi-diag

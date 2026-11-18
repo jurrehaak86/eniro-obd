@@ -914,6 +914,7 @@ erop. De belangrijkste:
 | `sensor.autopi_laatste_meting` | tijdstip van de laatste 12V-meting |
 | `binary_sensor.autopi_dongle_online` | of de dongle wakker en verbonden is |
 | `sensor.autopi_4g_signaal`, `sensor.autopi_4g_ruisverhouding`, `sensor.autopi_netwerk` | van autopi-diag |
+| `sensor.autopi_verbinding`, `sensor.autopi_wifi_netwerk`, `sensor.autopi_wifi_signaal` | van autopi-diag (v1.3): wifi/4G/geen, netwerknaam en RSSI (dBm; frequentie, band en linksnelheid als attributen). Op wifi elke 10 minuten bijgewerkt, op 4G alleen bij de wissel |
 
 **Controleer na het laden in Instellingen → Entiteiten of ze zo heten.**
 Bestaat een ID al (bijvoorbeeld van een eerdere poging, of van een integratie

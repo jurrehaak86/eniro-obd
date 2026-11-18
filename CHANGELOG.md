@@ -1,5 +1,69 @@
 # Changelog
 
+## v1.3.0 — 2026-11-18
+
+### Nieuw
+
+- **Wifi-status in Home Assistant.** `autopi-diag` stuurt een apart record naar
+  `autopi/device/wifi`, met drie nieuwe sensoren onder *AutoPi dongle*:
+  *Verbinding* (wifi/4G/geen), *Wifi netwerk* (SSID) en *Wifi signaal* (dBm,
+  met frequentie, band en linksnelheid als attributen). Op wifi elke 10
+  minuten, op 4G alleen bij de wissel, dus geen extra mobiele data. Leest
+  wpa_supplicant via een eigen client op de control-socket; `wpa_cli` werkt
+  niet onder `PrivateTmp`. `autopi_diag.py --selftest` test het zonder netwerk,
+  en `verify.sh` draait die test mee.
+
+### Opgelost
+
+- **Eerste record na een boot ~5 minuten te laat.** eniro-soc start voor de
+  ontvanger, dus het eerste record ging naar de wachtrij en pas bij de
+  volgende meting mee. Met een lokale ontvanger probeert eniro-soc de
+  wachtrij nu elke 15 s opnieuw (`SPOOL_RETRY`, korte timeout, niet bij een
+  stopverzoek). En `eniro-soc.service` start nu ná de ontvanger en stopt
+  ervóór (`Wants=`/`After=autopi-ingest.service`).
+- **Race in de ontvanger.** Een bundel die al aan het publiceren was kon een
+  ouder record ná een nieuwer live record op hetzelfde topic zetten, waarna de
+  SoC in HA terugsprong. Publiceren gaat nu één tegelijk (`publiceer_lock`).
+- **Profiel na herladen.** De automatisering *AutoPi - profiel naar dongle*
+  publiceert nu ook als je de automatiseringen herlaadt, niet alleen bij een
+  wissel of een herstart. Profiel heen en terug wisselen is niet meer nodig.
+- **Regeneratie na een meetgat telde als laden.** De laaddrempel in het
+  verbruik groeit mee met de afstand van de stap (`REGEN_MAX_KWH_PER_KM`, 0,3),
+  tot hoogstens 5 kWh (`LAAD_DREMPEL_MAX_KWH`). Een gat van 30 km met 2 kWh
+  regeneratie verdween tot nu toe uit het netto verbruik; laden na een lang
+  gat blijft laden.
+- **Klokwissel na de tijdsync.** De dongle start met de klok op 1970. Wachttijden
+  en de hartslag rekenen nu met `time.monotonic()`, zodat de sprong naar de
+  echte tijd geen onterechte hartslag of lege uitbox meer geeft.
+- De ontvanger stopt bij de eerste mislukte MQTT-publicatie in een upload
+  (503, de dongle biedt alles opnieuw aan), in plaats van per record de
+  timeout uit te zitten en zo andere uploads op te houden.
+- Een BrokenPipe-traceback in de ontvanger als eniro-soc al was opgegeven
+  (MQTT traag) is nu één logregel.
+
+### Gewijzigd
+
+- **Wachtrij robuuster.** Schrijven gaat atomair (`.tmp` + `os.replace`, met
+  fsync); lukt het niet, dan houdt eniro-soc de records in het geheugen in
+  plaats van ze weg te gooien. Halve `.tmp`-bestanden worden opgeruimd.
+  Versturen heeft een tijdsbudget per cyclus (`SPOOL_FLUSH_BUDGET`, 120 s).
+  Bij afsluiten gaat de uitbox eerst naar schijf en daarna pas, met een kort
+  budget, het netwerk op; systemd schoot hem anders soms af.
+- De laadvlag in de verbruiksgeschiedenis verdwijnt pas als het nieuwe punt
+  echt op schijf staat.
+- **Configcontrole bij het opstarten.** eniro-soc stopt met een duidelijke
+  melding (exitcode 2) bij een ontbrekende of verkeerde `INGEST_URL` of een
+  interval van 0 of minder. De unit start dan niet steeds opnieuw
+  (`RestartPreventExitStatus=2`).
+
+### Bijwerken vanaf v1.2
+
+`git pull` (of de nieuwe bestanden kopiëren), dan `sudo ./install.sh --dry-run`
+en `sudo ./install.sh`. Geen nieuwe verplichte instellingen. De drie
+wifi-sensoren verschijnen vanzelf via MQTT Discovery; zonder discovery:
+`eniro-mqtt.yaml` opnieuw laden. Gebruik je `eniro-autopi.yaml`, vervang dan
+ook dat bestand voor de herlaadtrigger van het profiel.
+
 ## v1.2.1 — 2026-11-18
 
 ### Gewijzigd

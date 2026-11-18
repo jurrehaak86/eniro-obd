@@ -79,6 +79,32 @@ volstaat.
 
 Draait als root omdat `qmicli` bij `/dev/cdc-wdm0` moet.
 
+## Wifi-status (v1.3)
+
+Elke run gaat er ook een apart record naar **`autopi/device/wifi`**, niet via de
+buffer: het gaat over nú.
+
+```json
+{"@t": "device.wifi", "verbinding": "wifi", "ssid": "Thuis",
+ "wifi_dbm": -74, "freq_mhz": 2462, "band": "2,4 GHz", "linkspeed_mbps": 19}
+```
+
+`verbinding` is `wifi`, `4G` of `geen`, afgeleid van de default route. Op wifi
+gaat het record elke run mee; op 4G alleen bij de wissel (één record
+`{"verbinding": "4G"}` als je wegrijdt). De vorige stand staat in
+`/var/lib/autopi-diag/verbinding`.
+
+De gegevens komen van wpa_supplicant via zijn control-socket
+(`/var/run/wpa_supplicant/wlan0`, commando's `STATUS` en `SIGNAL_POLL`). Niet via
+`wpa_cli`: die bindt zijn antwoordsocket in `/tmp`, en met `PrivateTmp=yes` in
+de unit komt het antwoord nooit aan. Het script gebruikt een abstracte socket,
+die wel werkt. Het BSSID gaat niet mee.
+
+```bash
+sudo python3 /opt/autopi-diag/autopi_diag.py --selftest   # zonder netwerk
+sudo python3 /opt/autopi-diag/autopi_diag.py --dry-run    # beide records tonen
+```
+
 ## Interpretatie
 
 | Waarde | Comfortabel | Werkbaar | Problematisch |

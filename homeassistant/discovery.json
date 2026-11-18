@@ -323,6 +323,40 @@
           "state_topic": "autopi/device/diag",
           "value_template": "{{ value_json.operator | default('onbekend') }} ({{ value_json.rat | default('?') | upper }})"
         },
+        "autopi_verbinding": {
+          "platform": "sensor",
+          "_comment": "Van diag/ (v1.3): wifi, 4G of geen, afgeleid van de default route. Op wifi elke 10 min bijgewerkt, op 4G alleen bij de wissel.",
+          "name": "Verbinding",
+          "unique_id": "autopi_verbinding",
+          "default_entity_id": "sensor.autopi_verbinding",
+          "state_topic": "autopi/device/wifi",
+          "value_template": "{{ value_json.verbinding | default('onbekend') }}",
+          "icon": "mdi:lan-connect"
+        },
+        "autopi_wifi_netwerk": {
+          "platform": "sensor",
+          "_comment": "Netwerknaam (SSID). Leeg (unknown) als de dongle niet op wifi zit.",
+          "name": "Wifi netwerk",
+          "unique_id": "autopi_wifi_netwerk",
+          "default_entity_id": "sensor.autopi_wifi_netwerk",
+          "state_topic": "autopi/device/wifi",
+          "value_template": "{{ value_json.ssid | default(none) }}",
+          "icon": "mdi:wifi"
+        },
+        "autopi_wifi_signaal": {
+          "platform": "sensor",
+          "_comment": "RSSI in dBm; frequentie, band en linksnelheid staan als attributen.",
+          "name": "Wifi signaal",
+          "unique_id": "autopi_wifi_signaal",
+          "default_entity_id": "sensor.autopi_wifi_signaal",
+          "state_topic": "autopi/device/wifi",
+          "value_template": "{{ value_json.wifi_dbm | default(none) }}",
+          "json_attributes_topic": "autopi/device/wifi",
+          "json_attributes_template": "{{ {'freq_mhz': value_json.freq_mhz | default(none), 'band': value_json.band | default(none), 'linkspeed_mbps': value_json.linkspeed_mbps | default(none)} | to_json }}",
+          "unit_of_measurement": "dBm",
+          "device_class": "signal_strength",
+          "state_class": "measurement"
+        },
         "autopi_dongle_online": {
           "platform": "binary_sensor",
           "_comment": "Het gezondheidssignaal van de dongle. Netjes gaan slapen = meteen offline; spanning abrupt weg = offline na ~7,5 min (1,5 x de keepalive van 300 s). Volgt STATUS_TOPIC van de ontvanger op de dongle (standaard autopi/dongle/status).",

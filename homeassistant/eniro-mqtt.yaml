@@ -325,6 +325,40 @@ mqtt:
         {{ value_json.operator | default('onbekend') }} ({{ value_json.rat | default('?') | upper }})
       device: *autopi_dongle
 
+    # Van diag/ (v1.3): wifi, 4G of geen, afgeleid van de default route.
+    # Op wifi elke 10 min bijgewerkt, op 4G alleen bij de wissel.
+    - name: Verbinding
+      unique_id: autopi_verbinding
+      default_entity_id: sensor.autopi_verbinding
+      state_topic: "autopi/device/wifi"
+      value_template: "{{ value_json.verbinding | default('onbekend') }}"
+      icon: "mdi:lan-connect"
+      device: *autopi_dongle
+
+    # Netwerknaam (SSID). Leeg (unknown) als de dongle niet op wifi zit.
+    - name: "Wifi netwerk"
+      unique_id: autopi_wifi_netwerk
+      default_entity_id: sensor.autopi_wifi_netwerk
+      state_topic: "autopi/device/wifi"
+      value_template: "{{ value_json.ssid | default(none) }}"
+      icon: "mdi:wifi"
+      device: *autopi_dongle
+
+    # RSSI in dBm; frequentie, band en linksnelheid staan als
+    # attributen.
+    - name: "Wifi signaal"
+      unique_id: autopi_wifi_signaal
+      default_entity_id: sensor.autopi_wifi_signaal
+      state_topic: "autopi/device/wifi"
+      value_template: "{{ value_json.wifi_dbm | default(none) }}"
+      json_attributes_topic: "autopi/device/wifi"
+      json_attributes_template: >-
+        {{ {'freq_mhz': value_json.freq_mhz | default(none), 'band': value_json.band | default(none), 'linkspeed_mbps': value_json.linkspeed_mbps | default(none)} | to_json }}
+      unit_of_measurement: dBm
+      device_class: signal_strength
+      state_class: measurement
+      device: *autopi_dongle
+
   binary_sensor:
     # ------------------------------------------------------------- Kia e-Niro
     # Laden = snelladen, of meer dan 1 A de accu in met het contact uit.

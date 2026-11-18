@@ -1,7 +1,11 @@
 [Unit]
 Description=eniro-soc - leest de BMS van de e-Niro en stuurt het naar de ingest
 Documentation=file:///opt/eniro-soc/README.md
-After=network.target
+# Na de ontvanger starten en vóór hem stoppen (v1.3): anders faalt het eerste
+# record na een boot, en bereikt de laatste uitbox bij het inslapen hem niet.
+# Wants, geen Requires: met een ontvanger elders bestaat de unit niet.
+Wants=autopi-ingest.service
+After=network.target autopi-ingest.service
 
 [Service]
 Type=simple
@@ -11,6 +15,8 @@ ExecStart=/usr/bin/python3 /opt/eniro-soc/eniro_soc.py
 SyslogIdentifier=eniro-soc
 Restart=always
 RestartSec=10
+# Exitcode 2 = configuratiefout (v1.3): niet elke 10 s opnieuw de log vullen.
+RestartPreventExitStatus=2
 
 # Draait als root omdat een raw CAN-socket CAP_NET_RAW vereist. Verder
 # zo weinig rechten als mogelijk.

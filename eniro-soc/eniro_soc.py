@@ -47,6 +47,7 @@ import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
+from urllib.parse import urlparse
 
 # ---------------------------------------------------------------- configuratie
 
@@ -94,6 +95,17 @@ VERBRUIK_BESTAND = os.environ.get(
 # en een actieradius van ~500 km waar Kia 262 zei. Elke laadsessie binnen de
 # honderd kilometer werd als regeneratie van het verbruik afgetrokken.
 LAAD_DREMPEL_KWH = float(os.environ.get("LAAD_DREMPEL_KWH", "1.0"))
+# v1.3 (H): de drempel groeit mee met de afstand van de stap. Normaal ligt er
+# een kilometer tussen twee punten, maar na een meetgat (dongle sliep, cluster
+# stil) kan een stap tientallen kilometers beslaan, en dan haalt gewone
+# regeneratie de 1 kWh wel. Die telde tot v1.2 als laden en viel weg uit het
+# netto verbruik. Per kilometer rekenen we met hoogstens de afdaling hierboven.
+REGEN_MAX_KWH_PER_KM = float(os.environ.get("REGEN_MAX_KWH_PER_KM", "0.3"))
+# Bovengrens voor die drempel. Zonder grens telde na een gat van 200 km een
+# laadsessie van 30 kWh zonder laadvlag als regeneratie (drempel 60 kWh), en
+# dan is het verbruik weer veel te gunstig, de fout van 28-09. Regeneratie
+# over een lang gat haalt 5 kWh zelden; een laadsessie bijna altijd.
+LAAD_DREMPEL_MAX_KWH = float(os.environ.get("LAAD_DREMPEL_MAX_KWH", "5.0"))
 LAADVLAG_BESTAND = os.environ.get(
     "LAADVLAG_BESTAND",
     os.path.join(os.path.dirname(VERBRUIK_BESTAND), "geladen-sinds-punt"))
@@ -116,7 +128,7 @@ CAN_RESTART_MS = int(os.environ.get("CAN_RESTART_MS", "100"))
 
 INGEST_URL = os.environ.get("INGEST_URL", "")
 HTTP_TIMEOUT = float(os.environ.get("HTTP_TIMEOUT", "30"))
-USER_AGENT = os.environ.get("USER_AGENT", "eniro-soc/1.2")
+USER_AGENT = os.environ.get("USER_AGENT", "eniro-soc/1.3")
 
 # Pollintervallen in seconden, per voertuigstatus.
 INTERVAL_DC = int(os.environ.get("INTERVAL_DC", "60"))
@@ -158,6 +170,19 @@ MAX_SILENCE_LADEN = int(os.environ.get("MAX_SILENCE_LADEN", "300"))
 
 SPOOL_DIR = os.environ.get("SPOOL_DIR", "/var/lib/eniro-soc/spool")
 SPOOL_MAX = int(os.environ.get("SPOOL_MAX", "500"))
+# v1.3 (E): hoogstens zoveel seconden per cyclus aan de wachtrij besteden, en
+# bij het afsluiten nog minder: systemd geeft 90 s voor het SIGKILL wordt.
+SPOOL_FLUSH_BUDGET = int(os.environ.get("SPOOL_FLUSH_BUDGET", "120"))
+SPOOL_FLUSH_BUDGET_STOP = int(os.environ.get("SPOOL_FLUSH_BUDGET_STOP", "20"))
+# Staat er iets in de wachtrij en is de ontvanger lokaal (127.0.0.1), probeer
+# dan elke zoveel seconden opnieuw in plaats van pas bij de volgende meting.
+# Na een boot ging het eerste record anders pas ~5 minuten later mee: de
+# ontvanger start net na eniro-soc. 0 = uit. Een ontvanger elders (HTTPS)
+# wordt niet zo vaak geprobeerd: elke poging kost dan een TLS-handshake.
+SPOOL_RETRY = int(os.environ.get("SPOOL_RETRY", "15"))
+# HTTP-timeout voor die extra pogingen en voor het afsluiten. De ontvanger is
+# lokaal; antwoordt hij niet binnen vijf seconden, dan is hij er niet.
+RETRY_TIMEOUT = float(os.environ.get("RETRY_TIMEOUT", "5"))
 
 # Status voor autopi-wakelock. Die houdt de dongle wakker zolang dit bestand
 # vers is en 'laden', 'snelladen' of 'rijden' zegt. Op de 12V-spanning alleen
@@ -170,6 +195,54 @@ STATUS_BESTAND = os.environ.get("STATUS_BESTAND", "/var/lib/eniro-soc/status.jso
 # een slapende auto kunnen zijn gateway wekken.
 INTERVAL_NO_BUS_START = int(os.environ.get("INTERVAL_NO_BUS_START", "15"))
 STARTUP_WINDOW = int(os.environ.get("STARTUP_WINDOW", "180"))
+
+
+def ingest_lokaal(url=None):
+    """True als de ontvanger op de dongle zelf draait."""
+    try:
+        host = urlparse(url if url is not None else INGEST_URL).hostname or ""
+    except ValueError:
+        return False
+    return host in ("127.0.0.1", "localhost", "::1")
+
+
+INGEST_LOKAAL = ingest_lokaal()
+
+
+def config_fouten(ingest_nodig=True):
+    """Controleert de instellingen bij het opstarten (v1.3, I).
+
+    Geeft een lijst foutmeldingen; leeg = in orde. Een verkeerde waarde gaf
+    tot v1.2 pas later een raadselachtige fout, of een lus die nooit sliep.
+    """
+    fouten = []
+    if ingest_nodig:
+        if not INGEST_URL:
+            fouten.append("INGEST_URL is niet gezet")
+        elif urlparse(INGEST_URL).scheme not in ("http", "https"):
+            fouten.append("INGEST_URL moet met http:// of https:// beginnen")
+    for naam in ("INTERVAL_DC", "INTERVAL_DRIVING", "INTERVAL_CHARGING",
+                 "INTERVAL_IDLE", "INTERVAL_NO_BUS", "INTERVAL_UNMETERED",
+                 "INTERVAL_NO_BUS_START", "MAX_SILENCE", "MAX_SILENCE_LADEN",
+                 "OUTBOX_MAX", "SPOOL_MAX", "CAN_BITRATE"):
+        if globals()[naam] <= 0:
+            fouten.append("%s moet groter dan 0 zijn (nu %s)" % (naam, globals()[naam]))
+    for naam in ("UPLOAD_WAIT", "UPLOAD_WAIT_DC", "SPOOL_FLUSH_BUDGET",
+                 "SPOOL_FLUSH_BUDGET_STOP", "SPOOL_RETRY", "STARTUP_WINDOW",
+                 "CAN_RESTART_MS"):
+        if globals()[naam] < 0:
+            fouten.append("%s mag niet negatief zijn (nu %s)" % (naam, globals()[naam]))
+    for naam in ("SOC_DELTA", "ODO_DELTA", "LAAD_DREMPEL_KWH", "HTTP_TIMEOUT",
+                 "CAN_TIMEOUT", "VERBRUIK_VENSTER_KM"):
+        if globals()[naam] <= 0:
+            fouten.append("%s moet groter dan 0 zijn (nu %s)" % (naam, globals()[naam]))
+    if REGEN_MAX_KWH_PER_KM < 0:
+        fouten.append("REGEN_MAX_KWH_PER_KM mag niet negatief zijn")
+    if VERBRUIK_BEWAAR_KM < VERBRUIK_VENSTER_KM:
+        fouten.append("VERBRUIK_BEWAAR_KM moet minstens VERBRUIK_VENSTER_KM zijn")
+    if not (ODO_MIN < ODO_MAX):
+        fouten.append("ODO_MIN moet kleiner zijn dan ODO_MAX")
+    return fouten
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 
@@ -500,16 +573,26 @@ def _verbruik_lees():
         return []
 
 
+def atomair_schrijf(pad, tekst, fsync=False):
+    """Schrijft via pad.tmp + os.replace: een lezer of een stroomonderbreking
+    ziet altijd het oude of het nieuwe bestand, nooit een half. Gooit OSError."""
+    os.makedirs(os.path.dirname(pad) or ".", exist_ok=True)
+    with open(pad + ".tmp", "w") as fh:
+        fh.write(tekst)
+        if fsync:
+            fh.flush()
+            os.fsync(fh.fileno())
+    os.replace(pad + ".tmp", pad)
+
+
 def _verbruik_schrijf(punten):
     try:
-        os.makedirs(os.path.dirname(VERBRUIK_BESTAND), exist_ok=True)
-        tijdelijk = VERBRUIK_BESTAND + ".tmp"
-        with open(tijdelijk, "w") as fh:
-            for p in punten:
-                fh.write(json.dumps(p, separators=(",", ":")) + "\n")
-        os.replace(tijdelijk, VERBRUIK_BESTAND)
+        atomair_schrijf(VERBRUIK_BESTAND, "".join(
+            json.dumps(p, separators=(",", ":")) + "\n" for p in punten))
+        return True
     except OSError as exc:
         log.warning("verbruiksgeschiedenis schrijven mislukt: %s", exc)
+        return False
 
 
 def schrijf_status(toestand, values=None):
@@ -523,12 +606,8 @@ def schrijf_status(toestand, values=None):
         data["soc"] = values.get("soc_display")
         data["hv_current"] = values.get("hv_current")
         data["ignition"] = values.get("ignition")
-    tijdelijk = STATUS_BESTAND + ".tmp"
     try:
-        os.makedirs(os.path.dirname(STATUS_BESTAND), exist_ok=True)
-        with open(tijdelijk, "w") as fh:
-            json.dump(data, fh)
-        os.replace(tijdelijk, STATUS_BESTAND)
+        atomair_schrijf(STATUS_BESTAND, json.dumps(data))
     except OSError as exc:
         log.warning("Status schrijven mislukt: %s", exc)
 
@@ -563,11 +642,25 @@ def markeer_laden(values):
         log.warning("laadvlag zetten mislukt: %s", exc)
 
 
-def _rij_stap(vorig, uit, inn, geladen):
-    """Netto rij-energie (kWh) tussen het vorige punt en nu."""
+def laad_drempel(d_km):
+    """Meer dan dit (kWh) de accu in over d_km kilometer kan geen regeneratie zijn."""
+    try:
+        d_km = max(float(d_km), 0.0)
+    except (TypeError, ValueError):
+        d_km = 0.0
+    return max(LAAD_DREMPEL_KWH,
+               min(d_km * REGEN_MAX_KWH_PER_KM, LAAD_DREMPEL_MAX_KWH))
+
+
+def _rij_stap(vorig, uit, inn, geladen, km=None):
+    """Netto rij-energie (kWh) tussen het vorige punt en nu.
+
+    km is de kilometerstand van het nieuwe punt; zonder km (oude aanroep)
+    geldt de vaste drempel."""
     d_uit = uit - vorig["uit"]
     d_in = inn - vorig["in"]
-    if geladen or d_in > LAAD_DREMPEL_KWH:
+    d_km = (km - vorig["km"]) if km is not None and "km" in vorig else 0.0
+    if geladen or d_in > laad_drempel(d_km):
         # Laadsessie ertussen: de geladen energie is geen regeneratie. Het
         # beetje regen van de laatste meters voor en na het parkeren laten we
         # vallen; dat is hooguit enkele Wh.
@@ -585,7 +678,8 @@ def _verbruik_herbereken(punten):
         return punten, False
     punten[0]["rij"] = 0.0
     for vorig, p in zip(punten, punten[1:]):
-        p["rij"] = round(vorig["rij"] + _rij_stap(vorig, p["uit"], p["in"], False), 3)
+        p["rij"] = round(vorig["rij"] + _rij_stap(vorig, p["uit"], p["in"], False,
+                                                    p["km"]), 3)
     return punten, True
 
 
@@ -616,13 +710,14 @@ def verbruik_venster(values):
     if not punten or km > punten[-1]["km"]:
         if punten:
             geladen = os.path.exists(LAADVLAG_BESTAND)
-            rij = punten[-1]["rij"] + _rij_stap(punten[-1], uit, inn, geladen)
+            rij = punten[-1]["rij"] + _rij_stap(punten[-1], uit, inn, geladen, km)
         else:
             geladen, rij = False, 0.0
         punten.append({"km": km, "uit": uit, "in": inn, "rij": round(rij, 3)})
         punten = [p for p in punten if km - p["km"] <= VERBRUIK_BEWAAR_KM]
-        _verbruik_schrijf(punten)
-        if geladen:
+        # Laadvlag alleen weg als het punt echt op schijf staat (v1.3, F).
+        # Anders is de laadsessie bij de volgende poging niet meer te zien.
+        if _verbruik_schrijf(punten) and geladen:
             try:
                 os.remove(LAADVLAG_BESTAND)
             except OSError:
@@ -726,7 +821,7 @@ def make_record(values):
     return rec
 
 
-def post(records):
+def post(records, timeout=None):
     if not INGEST_URL:
         raise RuntimeError("INGEST_URL is niet gezet")
     body = gzip.compress(
@@ -746,31 +841,67 @@ def post(records):
             "User-Agent": USER_AGENT,
         },
     )
-    with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+    with urllib.request.urlopen(req, timeout=timeout or HTTP_TIMEOUT) as resp:
         if resp.status != 200:
             raise RuntimeError("HTTP %s" % resp.status)
     return len(body)
 
 
 def spool_write(records):
+    """Zet records in de wachtrij. True als ze veilig op schijf staan.
+
+    Atomair (v1.3, F): eerst een .tmp, dan os.replace. Een stroomonderbreking
+    halverwege laat zo geen half bestand achter dat spool_flush() als
+    onleesbaar weggooit. Bij False houdt de aanroeper de records zelf vast.
+    """
     try:
-        os.makedirs(SPOOL_DIR, exist_ok=True)
         name = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%f") + ".json"
-        with open(os.path.join(SPOOL_DIR, name), "w") as fh:
-            json.dump(records, fh)
-        files = sorted(os.listdir(SPOOL_DIR))
+        atomair_schrijf(os.path.join(SPOOL_DIR, name), json.dumps(records), fsync=True)
+        files = spool_bestanden()
         for old in files[:-SPOOL_MAX]:
             os.remove(os.path.join(SPOOL_DIR, old))
         log.info("In wachtrij gezet (%d bestanden)", min(len(files), SPOOL_MAX))
+        return True
     except OSError as exc:
         log.error("Wegschrijven naar wachtrij mislukt: %s", exc)
+        return False
 
 
-def spool_flush():
-    """Verstuurt de wachtrij, oudste eerst. True als hij daarna leeg is."""
+def spool_bestanden():
+    """De wachtrijbestanden, oudste eerst. Halve .tmp-bestanden tellen niet."""
+    try:
+        return sorted(n for n in os.listdir(SPOOL_DIR) if n.endswith(".json"))
+    except OSError:
+        return []
+
+
+def spool_flush(budget=None, timeout=None):
+    """Verstuurt de wachtrij, oudste eerst. True als hij daarna leeg is.
+
+    Hoogstens `budget` seconden (v1.3, E; standaard SPOOL_FLUSH_BUDGET). Een
+    volle wachtrij over een traag 4G-signaal hield anders de meetlus
+    minutenlang vast. Wat overblijft gaat de volgende cyclus mee.
+    """
     if not os.path.isdir(SPOOL_DIR):
         return True
-    for name in sorted(os.listdir(SPOOL_DIR)):
+    budget = SPOOL_FLUSH_BUDGET if budget is None else budget
+    eind = time.monotonic() + budget
+    try:
+        alles = sorted(os.listdir(SPOOL_DIR))
+    except OSError:
+        return True
+    # Een .tmp is een schrijfactie die door stroomverlies niet afkwam; dit
+    # proces schrijft niet tegelijk, dus wat er nu staat is een wees.
+    for n in alles:
+        if n.endswith(".tmp"):
+            try:
+                os.remove(os.path.join(SPOOL_DIR, n))
+            except OSError:
+                pass
+    for name in (n for n in alles if n.endswith(".json")):
+        if time.monotonic() >= eind:
+            log.info("Wachtrij: tijdsbudget van %ss op, rest volgt later", budget)
+            return False
         path = os.path.join(SPOOL_DIR, name)
         try:
             with open(path) as fh:
@@ -783,7 +914,7 @@ def spool_flush():
                 pass
             continue
         try:
-            post(records)
+            post(records, timeout=timeout)
         except (urllib.error.URLError, OSError, RuntimeError) as exc:
             log.debug("Wachtrij nog niet te versturen: %s", exc)
             return False  # netwerk is weg, later opnieuw
@@ -866,16 +997,22 @@ def _gemeten_km(values):
 
 
 def worth_sending(values, last_sent, last_time):
-    """Alleen versturen bij verandering, of na MAX_SILENCE. Spaart data."""
+    """Alleen versturen bij verandering, of na MAX_SILENCE. Spaart data.
+
+    last_time komt van time.monotonic() (v1.3, I). De dongle start met de klok
+    op 1970 en springt pas na de tijdsync naar nu; met time.time() gaf dat
+    direct na het wekken een onterechte 'hartslag' en een lege uitbox.
+    """
     if last_sent is None:
         return True, "eerste meting"
     # Begin én einde van laden. Vóór v1.1 ging het einde van een AC-lading
     # (stroom −2 → 0 A, SOC en statusbits gelijk) nooit weg.
     if laadt(values) != laadt(last_sent):
         return True, "laadstatus veranderd"
-    if time.time() - last_time >= MAX_SILENCE:
+    stil = time.monotonic() - last_time
+    if stil >= MAX_SILENCE:
         return True, "hartslag"
-    if laadt(values) and time.time() - last_time >= MAX_SILENCE_LADEN - 5:
+    if laadt(values) and stil >= MAX_SILENCE_LADEN - 5:
         return True, "hartslag laden"
     for key in ("soc_display", "soc_bms"):
         if abs(values.get(key, 0) - last_sent.get(key, 0)) >= SOC_DELTA:
@@ -905,7 +1042,7 @@ def run_loop(dry_run=False):
     signal.signal(signal.SIGINT, handler)
 
     last_sent, last_time = None, 0.0
-    outbox, outbox_since = [], 0.0
+    outbox, outbox_since = [], None       # outbox_since: time.monotonic()
     vorige_toestand = None
     gestart = time.monotonic()
 
@@ -920,17 +1057,26 @@ def run_loop(dry_run=False):
         # wachtrij niet, dan sluit de uitbox achteraan aan.
         if not spool_flush():
             log.warning("Wachtrij nog niet weg, %d record(s) erachter gezet", aantal)
-            spool_write(outbox)
-            outbox, outbox_since = [], 0.0
+            naar_wachtrij()
             return
         try:
             grootte = post(outbox)
             log.info("Verstuurd: %d record(s), %d bytes (%s)", aantal, grootte, reden)
-            outbox, outbox_since = [], 0.0
+            outbox, outbox_since = [], None
         except (urllib.error.URLError, OSError, RuntimeError) as exc:
             log.warning("Versturen mislukt (%s), %d record(s) in wachtrij", exc, aantal)
-            spool_write(outbox)
-            outbox, outbox_since = [], 0.0
+            naar_wachtrij()
+
+    def naar_wachtrij():
+        """Uitbox naar schijf; alleen leeg als dat lukte (v1.3, F)."""
+        nonlocal outbox, outbox_since
+        if spool_write(outbox):
+            outbox, outbox_since = [], None
+        elif len(outbox) > OUTBOX_MAX * 4:
+            # Schijf kapot of vol: niet eindeloos geheugen vullen.
+            log.error("Wachtrij onschrijfbaar, oudste %d record(s) weggegooid",
+                      len(outbox) - OUTBOX_MAX * 4)
+            outbox = outbox[-OUTBOX_MAX * 4:]
 
     def slaap(seconden):
         """Wacht, maar stopt binnen twee seconden na SIGTERM.
@@ -941,11 +1087,22 @@ def run_loop(dry_run=False):
         precies bij het inslapen van de dongle. Vastgesteld 28-09-2026.
         """
         eind = time.monotonic() + seconden
+        opnieuw = time.monotonic() + SPOOL_RETRY
         while not stop["now"]:
             rest = eind - time.monotonic()
             if rest <= 0:
                 break
             time.sleep(min(2.0, rest))
+            # v1.3: wachtrij niet laten liggen tot de volgende meting. Alleen
+            # bij een lokale ontvanger; daar kost een poging niets.
+            # Niet bij een stopverzoek, en met een korte timeout: slaap() belooft
+            # binnen een paar seconden te stoppen na SIGTERM.
+            if (not dry_run and SPOOL_RETRY > 0 and INGEST_LOKAAL
+                    and not stop["now"] and time.monotonic() >= opnieuw):
+                opnieuw = time.monotonic() + SPOOL_RETRY
+                if spool_bestanden() and spool_flush(budget=SPOOL_RETRY,
+                                                     timeout=RETRY_TIMEOUT):
+                    log.info("Wachtrij leeg (opnieuw geprobeerd tijdens het wachten)")
 
     def bus_stil():
         """De auto is net stil gevallen: verstuur wat er nog wacht.
@@ -1028,9 +1185,9 @@ def run_loop(dry_run=False):
             schrijf_status(why, values)
             if send:
                 outbox.append(make_record(values))
-                if not outbox_since:
-                    outbox_since = time.time()
-                last_sent, last_time = values, time.time()
+                if outbox_since is None:
+                    outbox_since = time.monotonic()
+                last_sent, last_time = values, time.monotonic()
                 log.debug("In uitbox (%s, %d wachtend)", reason, len(outbox))
             else:
                 log.debug("Niet in uitbox: %s", reason)
@@ -1039,7 +1196,7 @@ def run_loop(dry_run=False):
                 wachttijd <= 0
                 or nieuw
                 or laadwissel
-                or time.time() - outbox_since >= wachttijd
+                or time.monotonic() - outbox_since >= wachttijd
                 or len(outbox) >= OUTBOX_MAX
             ):
                 leeg_outbox("uitbox vol" if len(outbox) >= OUTBOX_MAX else why)
@@ -1048,11 +1205,15 @@ def run_loop(dry_run=False):
 
         slaap(interval)
 
-    # Bij afsluiten niets weggooien: wat in de uitbox staat gaat alsnog mee,
-    # en anders naar de wachtrij. Zonder dit verlies je bij elke herstart tot
-    # UPLOAD_WAIT seconden aan metingen.
-    if outbox and not dry_run:
-        leeg_outbox("afsluiten")
+    # Bij afsluiten niets weggooien. Eerst de uitbox naar schijf (v1.3, E): dat
+    # is binnen een seconde klaar, terwijl versturen over een traag signaal
+    # langer kan duren dan systemd wacht, en dan ging de uitbox verloren. Daarna
+    # met een kort budget proberen de wachtrij nog weg te krijgen.
+    if not dry_run:
+        if outbox:
+            naar_wachtrij()
+        if spool_bestanden():
+            spool_flush(budget=SPOOL_FLUSH_BUDGET_STOP, timeout=RETRY_TIMEOUT)
 
 
 # --------------------------------------------------------------------- zelftest
@@ -1188,7 +1349,7 @@ def _robuustheid_selftest():
                  ignition=False, main_relay=True)
     laden = dict(basis, hv_current=-2.0)
     gestopt = dict(basis, hv_current=0.0)
-    vorige = time.time() - 60
+    vorige = time.monotonic() - 60
     checks += [
         ("A: −2 A → 0 A, SOC gelijk: versturen",
          worth_sending(gestopt, laden, vorige)[0]),
@@ -1361,7 +1522,7 @@ def _opgeslagen_selftest():
     # e: een ongewijzigde opgeslagen stand mag geen verzending uitlokken
     basis = dict(soc_display=80.0, soc_bms=79.5, dc_charging=False,
                  ignition=False, main_relay=True, hv_current=0.0)
-    vorige = time.time() - 60
+    vorige = time.monotonic() - 60
     opgeslagen = dict(basis, odometer_km=180120, odometer_bron="opgeslagen")
     gemeten = dict(basis, odometer_km=180120, odometer_bron="cluster")
     checks += [
@@ -1376,6 +1537,98 @@ def _opgeslagen_selftest():
         ("v1.2 e: cluster +1 km: wel versturen (als voorheen)",
          worth_sending(dict(gemeten, odometer_km=180121), gemeten, vorige)[0]),
     ]
+    return checks
+
+
+def _v13_selftest():
+    """v1.3: drempel per afstand (H), atomaire wachtrij (F), tijdsbudget (E),
+    configcontrole en monotone klok (I)."""
+    import shutil
+    import tempfile
+    global SPOOL_DIR, INGEST_URL, post
+    checks = []
+
+    # H: 30 km na een meetgat met 2 kWh regeneratie is rijden, geen laden
+    vorig = {"km": 180000, "uit": 100.0, "in": 50.0, "rij": 0.0}
+    gat = _rij_stap(vorig, 106.0, 52.0, False, 180030)
+    checks.append(("v1.3 H: 30 km meetgat met 2 kWh regen telt als regeneratie",
+                   abs(gat - 4.0) < 1e-6))
+    laad = _rij_stap(vorig, 100.2, 60.0, False, 180001)
+    checks.append(("v1.3 H: 10 kWh erin over 1 km blijft laden",
+                   abs(laad - 0.2) < 1e-6))
+    lang = _rij_stap(vorig, 101.0, 80.0, False, 180200)
+    checks.append(("v1.3 H: 30 kWh laden na 200 km gat blijft laden (bovengrens)",
+                   abs(lang - 1.0) < 1e-6))
+    checks.append(("v1.3 H: zonder km de vaste drempel (oude aanroep)",
+                   abs(_rij_stap(vorig, 106.0, 52.0, False) - 6.0) < 1e-6))
+
+    bewaard = (SPOOL_DIR, INGEST_URL, post)
+    d = tempfile.mkdtemp(prefix="eniro-v13-")
+    try:
+        SPOOL_DIR = os.path.join(d, "spool")
+        ok = spool_write([{"a": 1}])
+        bestanden = os.listdir(SPOOL_DIR)
+        checks.append(("v1.3 F: wachtrij schrijft atomair (geen .tmp over)",
+                       ok and len(bestanden) == 1 and bestanden[0].endswith(".json")))
+        open(os.path.join(SPOOL_DIR, "half.json.tmp"), "w").close()
+        checks.append(("v1.3 F: half .tmp-bestand telt niet als wachtrij",
+                       len(spool_bestanden()) == 1))
+        post = lambda records, timeout=None: 1    # noqa: E731
+        spool_flush()
+        checks.append(("v1.3 F: flush ruimt het halve .tmp-bestand op",
+                       os.listdir(SPOOL_DIR) == []))
+
+        # spool_write mislukt -> False (map is een bestand)
+        SPOOL_DIR = os.path.join(d, "geen-map")
+        open(SPOOL_DIR, "w").close()
+        checks.append(("v1.3 F: mislukt schrijven geeft False", spool_write([{}]) is False))
+
+        # E: tijdsbudget; elke post duurt 0,3 s, budget 0,5 s -> stopt na 2
+        SPOOL_DIR = os.path.join(d, "budget")
+        for i in range(5):
+            spool_write([{"i": i}])
+            time.sleep(0.002)
+        verstuurd = []
+
+        def trage_post(records, timeout=None):
+            time.sleep(0.3)
+            verstuurd.append(records[0]["i"])
+            return 1
+        post = trage_post
+        leeg = spool_flush(budget=0.5)
+        checks.append(("v1.3 E: tijdsbudget op -> False, rest blijft staan",
+                       leeg is False and verstuurd == [0, 1]
+                       and len(spool_bestanden()) == 3))
+        leeg = spool_flush(budget=10)
+        checks.append(("v1.3 E: volgende keer de rest, oudste eerst",
+                       leeg is True and verstuurd == [0, 1, 2, 3, 4]))
+    finally:
+        SPOOL_DIR, INGEST_URL, post = bewaard
+        shutil.rmtree(d, ignore_errors=True)
+
+    # I: configcontrole en lokale ontvanger
+    INGEST_URL = "http://127.0.0.1:8181/ingest/x"
+    try:
+        checks.append(("v1.3 I: standaardconfig zonder fouten", config_fouten() == []))
+        INGEST_URL = ""
+        checks.append(("v1.3 I: ontbrekende INGEST_URL gemeld",
+                       any("INGEST_URL" in f for f in config_fouten())))
+        checks.append(("v1.3 I: dry-run zonder INGEST_URL mag",
+                       config_fouten(ingest_nodig=False) == []))
+        INGEST_URL = "ftp://x/y"
+        checks.append(("v1.3 I: verkeerd schema gemeld",
+                       any("http" in f for f in config_fouten())))
+    finally:
+        INGEST_URL = bewaard[1]
+    checks.append(("v1.3: ontvanger 127.0.0.1 is lokaal, https elders niet",
+                   ingest_lokaal("http://127.0.0.1:8181/x")
+                   and not ingest_lokaal("https://voorbeeld.nl/x")))
+
+    # I: hartslag op de monotone klok, niet op de wandklok
+    basis = dict(soc_display=80.0, soc_bms=79.5, dc_charging=False,
+                 ignition=False, main_relay=True, hv_current=0.0)
+    checks.append(("v1.3 I: klok springt vooruit, geen onterechte hartslag",
+                   not worth_sending(basis, basis, time.monotonic() - 10)[0]))
     return checks
 
 
@@ -1411,6 +1664,7 @@ def selftest():
                                            b"\x01\x05", MIN_LEN_0105)))
     checks += _robuustheid_selftest()
     checks += _opgeslagen_selftest()
+    checks += _v13_selftest()
 
     verbruik = _verbruik_selftest()
     print("verbruiksvenster met laadsessie erin: %s" % json.dumps(verbruik))
@@ -1446,6 +1700,12 @@ def main():
 
     if args.selftest:
         return selftest()
+
+    fouten = config_fouten(ingest_nodig=not args.dry_run)
+    if fouten:
+        for f in fouten:
+            log.error("Configuratie: %s", f)
+        return 2
 
     if args.once:
         sock = open_can(CAN_IFACE)
