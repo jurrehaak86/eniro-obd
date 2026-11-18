@@ -48,7 +48,7 @@ DEFAULTS = [
     ("INTERVAL_UNMETERED", "60"),
     ("UPLOAD_WAIT", "300"),
     ("GPS_INTERVAL", "60"),
-    ("INACTIVITY_PERIOD", "3600"),
+    ("INACTIVITY_PERIOD", "900"),
     ("BATTERY_CHECK_INTERVAL", "30"),
     ("SHAKE_THRESHOLD", "0.05"),
     ("SPRAAK_UIT", "1"),

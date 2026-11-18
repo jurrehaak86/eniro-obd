@@ -1208,7 +1208,7 @@ grafiek daar is in MB). Ook thuis op wifi gaat er een klein beetje over 4G
 | rpiboot blijft op `Waiting for BCM…` | jumper niet goed tijdens power-on, of een laad-only USB-kabel | spanning eraf, jumper controleren, andere kabel, opnieuw |
 | Dongle boot niet na het flashen | `CM4 Flash`-jumper zit er nog op | eraf |
 | Dongle valt na een paar minuten uit | sleep-timer (4 min) of `battery_critical_level` | 4.2; auto in ready |
-| Dongle gaat ~61 minuten na elke boot uit, ook tijdens laden | de reactor-uurtimer (`inactivity_fallback`, `period: 3600`) | `autopi-wakelock` (A.10); controleer `journalctl -u autopi-wakelock` |
+| Dongle gaat ~16 minuten na elke boot uit (~61 bij `period: 3600`), ook tijdens laden | de reactor-timer (`inactivity_fallback`, `period` uit `INACTIVITY_PERIOD`) | `autopi-wakelock` (A.10); controleer `journalctl -u autopi-wakelock` |
 | Dongle slaapt na een lading niet meer | wakelock liet los zonder een timer terug te zetten (oude versie) | huidige `autopi_wakelock.py` installeren |
 | SSH over wifi: time-out, ping werkt ook niet | geen firewallregel voor `wlan0` | A.2 |
 | SSH over wifi traag, pings van ~2000 ms | hotspot en wifi-client delen één radio | ethernetkabel voor langer werk; trage toegang die werkt is beter dan de hotspot uitzetten |
@@ -1618,19 +1618,25 @@ meldingen van gemaakt (7.6).
 #### A.3.3 Langer wakker na het opstarten
 
 Standaard slaapt de dongle 4 minuten na een boot zonder rijdende motor. Dat
-maakt elk onderhoud een race. Naar een uur:
+maakt elk onderhoud een race. Naar een kwartier (`install.sh`:
+`INACTIVITY_PERIOD`, standaard 900):
 
 ```bash
 grep -n "period: 240" /etc/salt/minion.d/engines.conf        # precies twee treffers
-sudo sed -i 's/period: 240$/period: 3600/' /etc/salt/minion.d/engines.conf
-grep -n "period: 3600" /etc/salt/minion.d/engines.conf
+sudo sed -i 's/period: 240$/period: 900/' /etc/salt/minion.d/engines.conf
+grep -n "period: 900" /etc/salt/minion.d/engines.conf
 ```
+
+Tot v1.2.0 stond hier een uur (3600). Sinds de wakelock (A.10) rijden en laden
+vasthoudt, telt deze timer alleen nog bij wakes waarin niets gebeurt; een uur
+wakker zonder te meten belast alleen de 12V-accu. Heb je voor onderhoud meer
+tijd nodig, wis dan de timers (4.2).
 
 Dit zijn de twee inactiviteitsreactors (`inactivity_fallback` na wekken op
 spanning, `inactivity_after_sleep` na wekken op de timer). Ze zetten bij elke
-boot een sleep timer van een uur, met daarna 6 uur slapen. Gewist worden ze
+boot een sleep timer van een kwartier (na 60 s vertraging), met daarna 6 uur slapen. Gewist worden ze
 alleen bij het event `vehicle/engine/running`, en **dat event komt op deze auto
-niet**. Gevolg zonder verdere maatregelen: elke boot duurt ~61 minuten, ook
+niet**. Gevolg zonder verdere maatregelen: elke boot duurt ~16 minuten, ook
 midden in een rit of een laadsessie. Tijdens het rijden wekt de spanning de
 dongle meteen weer, tijdens AC-laden niet (de boordspanning staat dan op
 ~13,0 V).
@@ -1957,8 +1963,8 @@ Het **wakker blijven** is het probleem; dat is A.10.
 ### A.10 autopi-wakelock — wakker blijven tijdens rijden en laden
 
 Zonder dit gaat de dongle tijdens het laden gewoon slapen — precies wanneer je
-data wil. Twee oorzaken: de reactor-uurtimer uit A.3.3 (elke boot eindigt na
-~61 minuten), en de `engine_stopped`-timer van 15 minuten.
+data wil. Twee oorzaken: de reactor-timer uit A.3.3 (elke boot eindigt na
+~16 minuten), en de `engine_stopped`-timer van 15 minuten.
 
 Elke vijf minuten beslist het script:
 

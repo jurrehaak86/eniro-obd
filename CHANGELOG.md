@@ -1,5 +1,26 @@
 # Changelog
 
+## v1.2.1 — 2026-11-18
+
+### Gewijzigd
+
+- **`INACTIVITY_PERIOD` standaard 900 in plaats van 3600.** Na een boot zonder
+  rijdende motor blijft de dongle nu ~16 minuten wakker (900 s plus 60 s
+  vertraging) in plaats van ~61. Rijden en laden houdt `autopi-wakelock` al
+  vast; het uur gold alleen nog voor wakes waarin niets gebeurt, zoals de
+  timer-wake elke 6 uur met een slapende auto. Dat is ~45 minuten minder
+  12V-belasting per lege wake. In de boots van 11 t/m 18-11 wiste de wakelock
+  de timer bij rijden en laden steeds binnen ~5 minuten na boot, dus een
+  kwartier laat ruim marge.
+
+### Bijwerken vanaf v1.2.0
+
+Bestaande installaties houden de waarde uit hun eigen `config.env`. Overstappen:
+zet `INACTIVITY_PERIOD=900` in `config.env`, dan `sudo ./install.sh --dry-run`
+(alleen de twee `period`-regels in `engines.conf` veranderen) en
+`sudo ./install.sh`. Voor onderhoud via SSH met de auto stil: eerst de timers
+wissen (INSTALLATIE 4.2).
+
 ## v1.2.0 — 2026-11-04
 
 Eén bestand invullen en één script draaien, in plaats van tientallen commando's

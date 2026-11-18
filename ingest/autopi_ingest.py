@@ -189,7 +189,7 @@ METERED_IFACES = set(
 # MQTT Discovery (v1.2). Standaard UIT in de code, zodat een bestaande
 # installatie niets merkt; install.sh zet HA_DISCOVERY=1 bij een verse
 # installatie. Zie homeassistant/discovery.json en INSTALLATIE (Home Assistant).
-VERSIE = "1.2.0"
+VERSIE = "1.2.1"
 PROJECT_URL = "https://github.com/jurrehaak86/eniro-obd"
 HA_DISCOVERY = os.environ.get("HA_DISCOVERY", "0").strip() == "1"
 HA_DISCOVERY_PREFIX = (os.environ.get("HA_DISCOVERY_PREFIX", "").strip().strip("/")
